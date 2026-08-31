@@ -541,3 +541,28 @@ test('keeps UNKNOWN distinct from FALSE underneath NOT', () => {
 
   for (const sql of expressions) assertEquivalent(sql, COMBINATORIAL_ROWS);
 });
+test('drops an AND branch whose prodid list was hoisted instead of widening it', () => {
+  const sql = "(Prodcode = 31 AND prodid IN (1, 2)) OR prodid IN (3) OR (Prodcode = 56 AND Brand = 'x')";
+  const result = optimiseSql(sql, { groupProdid: true });
+  assert.equal(result.error, undefined);
+
+  const keys = tokenKeys(result.optimizedOneLine);
+  /* Prodcode = 31 only ever selected prodid 1 and 2, and both moved into the
+     hoisted override, so no bare Prodcode = 31 may survive. */
+  assert.ok(!keys.includes('num:31'), result.optimizedOneLine);
+  for (const value of ['1', '2', '3']) {
+    assert.ok(keys.includes(`num:${value}`), `${value} should stay in the override: ${result.optimizedOneLine}`);
+  }
+  /* A branch with no prodid conjunct is untouched. */
+  assert.ok(keys.includes('num:56'), result.optimizedOneLine);
+});
+
+test('keeps the siblings of a hoisted NOT IN and of a stripped OR arm', () => {
+  const negated = optimiseSql("Prodcode = 31 AND prodid NOT IN (1, 2)", { groupProdid: true });
+  assert.equal(negated.error, undefined);
+  assert.ok(tokenKeys(negated.optimizedOneLine).includes('num:31'), negated.optimizedOneLine);
+
+  const arm = optimiseSql("Prodcode = 31 AND (Brand = 'x' OR prodid IN (1))", { groupProdid: true });
+  assert.equal(arm.error, undefined);
+  assert.ok(tokenKeys(arm.optimizedOneLine).includes('num:31'), arm.optimizedOneLine);
+});

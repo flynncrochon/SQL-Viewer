@@ -801,16 +801,24 @@
     }
     if (node.kind === 'const' || node.kind === 'not') return node;
 
-    const children = node.children.map(child => stripProdidConditions(child, collected));
-    if (node.kind === 'and') {
-      if (children.some(child => child === null)) {
-        const remaining = children.filter(child => child !== null);
-        return remaining.length ? makeLogic('and', remaining) : null;
-      }
-      return makeLogic('and', children);
-    }
-    const remaining = children.filter(child => child !== null);
-    return remaining.length ? makeLogic('or', remaining) : null;
+    const children = node.children.map(child => {
+      const mark = collected.length;
+      const result = stripProdidConditions(child, collected);
+      const tookPositive = result === null && collected.slice(mark).some(condition => condition.kind === 'positive');
+      return { result, tookPositive };
+    });
+    /* An AND that lost a positive prodid list is dropped whole. Its rows are a
+       subset of that list, so the hoisted OR override already covers them,
+       while keeping the surviving siblings would widen the branch to every row
+       they match on their own (Prodcode = 31 AND prodid IN (...) would become
+       a bare Prodcode = 31). A stripped OR child is safe to keep because what
+       is left still matches a subset of the rows it did before, and a negative
+       list narrows rather than widens and is re-applied globally, so neither
+       one forces the branch out. */
+    if (node.kind === 'and' && children.some(child => child.tookPositive)) return null;
+
+    const remaining = children.map(child => child.result).filter(child => child !== null);
+    return remaining.length ? makeLogic(node.kind, remaining) : null;
   }
 
   function groupProdid(node, ctx) {
