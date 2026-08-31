@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SQL Viewer</title>
+<link rel="icon" type="image/svg+xml" href="icons/sql-viewer-brackets-vscode-balanced.svg">
+<meta name="description" content="Paste SQL, see it broken down by bracket depth, and review safe logical optimisations.">
+<link rel="preconnect" href="https://cdn.jsdelivr.net">
+<link rel="stylesheet" href="styles.css?v=prodid-group-1">
+</head>
+<body>
+  <header class="bar">
+    <button class="optimiser-button" id="optimiser" type="button" title="Open SQL Optimiser">
+      <span>Optimiser</span>
+    </button>
+    <button class="optimiser-button fold-all-button" id="foldAll" type="button" title="Collapse all brackets" aria-label="Collapse all brackets">
+      <span id="foldAllText">Collapse all</span>
+    </button>
+    <span class="spacer"></span>
+    <button class="status" id="status" type="button" title="Validity check" aria-live="polite" aria-atomic="true">
+      <span id="statusText"></span>
+    </button>
+  </header>
+
+  <main class="panes">
+    <section class="pane">
+      <div class="editor" id="srcEditor">
+        <div class="hovline" id="srcHov"></div>
+        <div class="curline" id="srcCur"></div>
+        <div class="gutter" id="srcGut" aria-hidden="true"><div class="gutter-in" id="srcGutIn"></div></div>
+        <pre class="mirror wrap" id="srcMirror" aria-hidden="true"></pre>
+        <textarea id="src" spellcheck="false" autocomplete="off" autocapitalize="off"
+                  autocorrect="off" wrap="soft" aria-label="SQL source"></textarea>
+      </div>
+    </section>
+
+    <section class="pane">
+      <div class="editor" id="fmtEditor">
+        <div class="hovline" id="fmtHov"></div>
+        <div class="curline" id="fmtCur"></div>
+        <div class="diagline" id="fmtDiagLine" aria-hidden="true"></div>
+        <div class="diag-label" id="fmtDiagLabel" aria-hidden="true"></div>
+        <div class="gutter" id="fmtGut"><div class="gutter-in" id="fmtGutIn"></div></div>
+        <pre class="mirror" id="fmtMirror" aria-hidden="true"></pre>
+        <textarea id="fmt" spellcheck="false" autocomplete="off" autocapitalize="off"
+                  autocorrect="off" wrap="off" aria-label="Formatted SQL"></textarea>
+      </div>
+    </section>
+  </main>
+
+  <div class="optimizer-modal" id="optimizerModal" hidden aria-hidden="true">
+    <div class="optimizer-dialog" role="dialog" aria-modal="true" aria-label="SQL Optimiser">
+      <div class="optimizer-titlebar">
+        <div class="optimizer-header-side old-title">
+          <span class="optimizer-title">Old</span>
+          <button class="optimizer-copy" id="optimizerCopyOld" type="button" title="Copy old SQL">copy</button>
+        </div>
+        <div class="optimizer-header-side new-title">
+          <span class="optimizer-title">New</span>
+          <button class="optimizer-copy" id="optimizerCopyNew" type="button" title="Copy optimised SQL">copy</button>
+          <button class="optimizer-toggle" id="optimizerGroupProdid" type="button" title="Group prodid conditions" aria-label="Group prodid conditions" aria-pressed="false"><span class="optimizer-toggle-long">group prodid</span><span class="optimizer-toggle-short" aria-hidden="true">prodid</span></button>
+          <span class="optimizer-change-count" id="optimizerChangeCount" aria-label="Character changes">
+            <span class="optimizer-added" id="optimizerAdded">+0</span><span class="optimizer-count-separator">, </span><span class="optimizer-removed" id="optimizerRemoved">-0</span>
+          </span>
+        </div>
+        <span class="optimizer-close" id="optimizerClose" role="button" tabindex="0" aria-label="Close optimiser">×</span>
+      </div>
+      <div class="optimizer-diff-grid">
+        <pre class="optimizer-code old-code" id="optimizerOld" tabindex="0" aria-label="Old SQL"></pre>
+        <pre class="optimizer-code new-code" id="optimizerNew" tabindex="0" aria-label="Optimised SQL"></pre>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/node-sql-parser@5.4.0/umd/mysql.umd.js" defer></script>
+<script src="app.js?v=scroll-lock-7" defer></script>
+<script src="optimizer.js?v=prodid-group-1" defer></script>
+</body>
+</html>

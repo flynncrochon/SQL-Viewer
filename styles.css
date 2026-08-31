@@ -1,0 +1,258 @@
+/* Palette lifted from VS Code's "Dark+" / Dark (Visual Studio) theme. */
+:root{
+  --bg:#1e1e1e;            /* editor.background */
+  --chrome:#252526;        /* sideBar.background - the header bar */
+  --line:#2b2b2b;          /* panel.border */
+  --fg:#d4d4d4;            /* editor.foreground */
+  --fg-faint:#858585;      /* editorLineNumber.foreground */
+  --guide:#404040;         /* editorIndentGuide.background */
+  --sel:#264f78;           /* editor.selectionBackground */
+  --caret:#aeafad;         /* editorCursor.foreground */
+  --hover:#2a2d2e;         /* list.hoverBackground */
+  --row-hover:#242424;     /* the row under the pointer */
+  --row-caret:#2d2d2e;     /* the row the caret sits on */
+
+  /* dark_plus token colours */
+  --kw:#d16969;            /* SELECT / WHERE / AND / OR - VS Code's red */
+  --fn:#dcdcaa;            /* entity.name.function */
+  --str:#ce9178;           /* string.quoted */
+  --num:#b5cea8;           /* constant.numeric */
+  --lit:#569cd6;           /* constant.language - NULL / TRUE / FALSE */
+  --op:#a9b7c6;
+  --id:#9cdcfe;            /* columns */
+  --qid:#c586c0;           /* `quoted` / [quoted] identifiers */
+  --com:#6a9955;           /* comment */
+
+  /* editorBracketHighlight.foreground1..3 - VS Code cycles through three */
+  --b0:#ffd700;
+  --b1:#da70d6;
+  --b2:#179fff;
+
+  --ok:#73c991;            /* testing.iconPassed */
+  --bad:#f14c4c;           /* editorError.foreground */
+  --wait:#858585;
+
+  --mono:ui-monospace,"SF Mono","Cascadia Mono","Cascadia Code",Consolas,"Courier New",monospace;
+  --fs:12.5px;
+  --lh:1.62;
+  --pad:14px;
+}
+
+*{box-sizing:border-box}
+html,body{height:100%}
+body{
+  margin:0;background:var(--bg);color:var(--fg);
+  font-family:var(--mono);font-size:var(--fs);
+  display:flex;flex-direction:column;
+  -webkit-font-smoothing:antialiased;
+}
+::selection{background:var(--sel)}
+
+/* ---- top bar ---- */
+.bar{
+  display:flex;align-items:center;gap:12px;
+  padding:0 14px;height:38px;flex:0 0 auto;
+  border-bottom:1px solid var(--line);
+  background:var(--chrome);
+}
+.optimiser-button{
+  appearance:none;display:inline-flex;align-items:center;height:22px;padding:0 8px;
+  border:1px solid var(--guide);border-radius:3px;
+  background:transparent;color:var(--fg-faint);
+  font:inherit;font-size:12px;cursor:pointer;
+  transition:color .15s ease,border-color .15s ease;
+}
+.optimiser-button:hover{border-color:var(--fg-faint);color:var(--fg)}
+.optimiser-button:disabled{opacity:.5;cursor:default}
+.optimiser-button:focus-visible{outline:1px solid #8c8c8c;outline-offset:2px}
+.spacer{flex:1}
+.status{
+  appearance:none;border:0;border-radius:4px;padding:4px 6px;margin:-4px -6px;
+  background:transparent;text-align:right;
+  font-size:12px;color:var(--wait);
+  min-width:0;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;
+  transition:color .15s ease;
+}
+.status:disabled{cursor:default}
+.status[data-s="bad"]{cursor:pointer;text-decoration:underline dotted;text-underline-offset:3px}
+.status[data-s="bad"]:hover{background:#f14c4c12}
+.status:focus-visible{outline:1px solid var(--bad);outline-offset:2px}
+.status[data-s="ok"]{color:var(--ok)}
+.status[data-s="bad"]{color:var(--bad)}
+
+/* ---- panes ---- */
+.panes{flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr}
+.pane{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--bg)}
+.pane + .pane{border-left:1px solid var(--line)}
+
+/* ---- editor: a transparent textarea under a highlighted mirror ---- */
+.editor{position:relative;flex:1;min-height:0;overflow:hidden;--gut:44px}
+
+.mirror,.editor textarea{
+  position:absolute;inset:0;margin:0;
+  padding:var(--pad) 16px var(--pad) var(--gut);
+  font:inherit;font-size:var(--fs);line-height:var(--lh);
+  font-family:var(--mono);
+  tab-size:2;border:0;
+  white-space:pre;overflow-wrap:normal;
+}
+/* the source pane soft-wraps; the formatted pane scrolls sideways */
+.mirror.wrap,#src{white-space:pre-wrap;overflow-wrap:break-word;word-break:normal}
+
+/* The mirror sits ON TOP of the textarea. The textarea paints its selection
+   rectangle in the layer below, so selected text still shows in full syntax
+   colour instead of being blanked out by the highlight. */
+.mirror{
+  z-index:2;overflow:auto;overscroll-behavior:contain;color:var(--fg);
+  pointer-events:none;user-select:none;
+}
+.editor textarea{
+  z-index:1;
+  background:transparent;color:transparent;caret-color:var(--caret);
+  resize:none;outline:none;overflow:auto;overscroll-behavior:contain;
+}
+.editor textarea::selection{background:var(--sel)}
+.mirror::-webkit-scrollbar{display:none}
+
+/* while a drag is running in the other pane */
+.no-select,.no-select *{user-select:none;-webkit-user-select:none}
+
+/* rows carry the indent guides; indentation itself is real spaces in the text */
+.lrow{
+  margin:0;
+  background-image:repeating-linear-gradient(to right,var(--guide) 0 1px,transparent 1px 2ch);
+  background-size:calc(var(--i,0) * 2ch) 100%;
+  background-repeat:no-repeat;
+}
+
+/* the row under the pointer, and the row the caret is on in both panes at once.
+   Both are single visual rows, so a soft-wrapped source line highlights only
+   the fragment you are actually on. */
+.hovline,.curline{
+  position:absolute;left:0;right:0;top:0;
+  z-index:0;pointer-events:none;display:none;
+}
+.hovline{background:var(--row-hover)}
+.curline{background:var(--row-caret)}   /* declared later, so it wins on the same row */
+.diagline{
+  display:none;left:0;right:0;height:calc(var(--fs) * var(--lh));
+  background:#f14c4c0d;
+  z-index:1;pointer-events:none;
+}
+.diag-label{
+  display:none;position:absolute;right:22px;padding:3px 7px;
+  border:1px solid #913b3b;border-radius:4px;background:#3b1f20;
+  color:#ffb4b4;font:11px/1.2 var(--mono);white-space:nowrap;
+  z-index:4;pointer-events:none;box-shadow:0 2px 8px #0008;
+}
+.lrow.diag-row{background-color:#f14c4c0b}
+.lrow.diag-related-row{background-color:#ffd70008}
+
+/* ---- line numbers ---- */
+.gutter{
+  position:absolute;left:0;top:0;bottom:0;width:var(--gut);
+  padding:var(--pad) 0;overflow:hidden;
+  background:var(--bg);z-index:3;
+  pointer-events:none;user-select:none;
+}
+.gutter-in i{
+  display:flex;align-items:flex-start;gap:5px;
+  padding:0 8px 0 10px;font-style:normal;
+}
+.gutter-in b{
+  flex:1;text-align:right;font-weight:normal;
+  color:var(--fg-faint);line-height:var(--lh);
+}
+
+/* ---- fold arrows ---- */
+.fold,.fs{
+  width:11px;flex:0 0 11px;text-decoration:none;
+  line-height:var(--lh);
+}
+.fold{
+  display:flex;align-items:center;justify-content:center;
+  height:calc(var(--fs) * var(--lh));border-radius:3px;
+  color:#c5c5c5;cursor:pointer;font-size:12px;
+  pointer-events:auto;
+  transition:background .1s ease,color .1s ease;
+}
+.fold:hover{background:var(--hover);color:#fff}
+.fold.shut{color:var(--b0)}
+.fold.shut:hover{background:#ffd7001f;color:var(--b0)}
+.diag-glyph{
+  display:inline-block;width:11px;flex:0 0 11px;color:var(--bad);
+  font-weight:bold;text-align:center;line-height:var(--lh)
+}
+
+/* The pill standing in for a collapsed chain. Exactly three monospace cells
+   wide, because the textarea underneath holds three real characters there and
+   the two have to line up. */
+.ell{
+  display:inline-block;width:3ch;text-align:center;
+  border-radius:3px;background:#3a3d41;color:#cccccc;
+  cursor:pointer;pointer-events:auto;
+}
+.ell:hover{background:#4a4e53;color:#fff}
+
+/* ---- tokens ---- */
+.t-kw{color:var(--kw)}
+.t-fn{color:var(--fn)}
+.t-str{color:var(--str)}
+.t-num{color:var(--num)}
+.t-lit{color:var(--lit)}
+.t-op{color:var(--op)}
+.t-id{color:var(--id)}
+.t-qid{color:var(--qid)}
+.t-com{color:var(--com)}
+.t-punct{color:var(--op)}
+.b0{color:var(--b0)}.b1{color:var(--b1)}.b2{color:var(--b2)}
+
+/* the pair either side of the caret */
+.p{border-radius:2px}
+.p.hit{background:#ffffff1f;box-shadow:0 0 0 1px #ffffff40}
+.diag-primary{background:#f14c4c38!important;box-shadow:0 0 0 1px #f14c4ccc;border-radius:2px}
+.diag-related{background:#ffd70024!important;box-shadow:0 0 0 1px #ffd700aa;border-radius:2px}
+
+/* ---- scrollbars ---- */
+*::-webkit-scrollbar{width:14px;height:14px}
+*::-webkit-scrollbar-track{background:transparent}
+*::-webkit-scrollbar-thumb{background:#79797966;border:3px solid transparent;background-clip:content-box}
+*::-webkit-scrollbar-thumb:hover{background:#646464b3;background-clip:content-box}
+
+@media (max-width:900px){
+  .panes{grid-template-columns:1fr;grid-template-rows:1fr 1fr}
+  .pane + .pane{border-left:0;border-top:1px solid var(--line)}
+}
+@media (prefers-reduced-motion:reduce){*{transition:none!important}}
+
+/* ---- optimiser overlay: deliberately small, editor-like, and disposable ---- */
+.optimizer-modal{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:#0009}
+.optimizer-modal[hidden]{display:none}
+.optimizer-dialog{width:min(1120px,calc(100vw - 48px));height:min(640px,calc(100vh - 72px));display:flex;flex-direction:column;background:var(--bg);border:1px solid #3f3f46;box-shadow:0 18px 48px #000b}
+.optimizer-titlebar{position:relative;display:grid;grid-template-columns:1fr 1fr;flex:0 0 32px;border-bottom:1px solid var(--line);background:var(--chrome);font:inherit;font-size:11px;line-height:32px;font-weight:400}
+.optimizer-header-side{display:flex;align-items:center;gap:8px;min-width:0;padding:0 12px}.optimizer-title{color:var(--fg-faint)}.old-title{border-right:1px solid var(--line)}.new-title{color:var(--fg)}
+.optimizer-copy,.optimizer-toggle{height:20px;padding:0 6px;border:1px solid #45484d;border-radius:2px;background:transparent;color:var(--fg-faint);font:inherit;font-size:10px;line-height:18px;cursor:pointer}
+.optimizer-copy:hover,.optimizer-toggle:hover{border-color:#73777d;background:#303236;color:var(--fg)}
+.optimizer-toggle[aria-pressed="true"]{border-color:#64866d;background:#26372b;color:#b7dfbe}
+.optimizer-toggle-short{display:none}
+.optimizer-copy.copied{border-color:#64866d;color:#a9d7b3}
+.optimizer-change-count{display:inline-flex;align-items:center;white-space:nowrap;color:var(--fg-faint);font:inherit;font-size:10px;line-height:20px}
+.optimizer-added{color:#8ed69e}.optimizer-removed{color:#f18484}
+.optimizer-close{position:absolute;right:0;top:0;width:32px;text-align:center;color:var(--fg-faint);font:inherit;font-size:18px;line-height:30px;cursor:pointer}
+.optimizer-close:hover,.optimizer-close:focus{color:#fff;background:var(--hover);outline:none}
+.optimizer-diff-grid{display:grid;grid-template-columns:1fr 1fr;min-height:0;flex:1}
+.optimizer-code{min-width:0;min-height:0;margin:0;padding:12px 14px;font-family:var(--mono);font-size:var(--fs);line-height:var(--lh);font-weight:400;white-space:pre-wrap;overflow:auto;overflow-wrap:normal;word-break:normal;user-select:text;outline:none;tab-size:2}
+.old-code{border-right:1px solid var(--line);background:var(--bg)}.new-code{background:var(--bg);white-space:pre-wrap;overflow-wrap:normal;word-break:normal;overflow-x:auto}
+.optimizer-code:focus-visible{box-shadow:inset 0 0 0 1px #707070}
+.optimizer-code::selection{background:var(--sel)}
+.optimizer-code .diff-removed,.optimizer-code .diff-added{font:inherit;font-weight:400;border-radius:2px}
+.old-code .diff-removed{position:relative;background:#f14c4c35;color:#f3b1b1;text-decoration-line:line-through;text-decoration-style:solid;text-decoration-color:#f18484;text-decoration-thickness:.12em;text-decoration-skip-ink:none;box-decoration-break:clone;-webkit-box-decoration-break:clone}
+.new-code .diff-added{background:#73c99135;color:#bfe7c9}
+body.optimizer-is-open{overflow:hidden}
+
+@media (max-width:700px){
+  .optimizer-dialog{width:calc(100vw - 20px);height:calc(100vh - 28px)}
+  .optimizer-diff-grid{grid-template-columns:1fr;grid-template-rows:1fr 1fr}
+  .old-code{border-right:0;border-bottom:1px solid var(--line)}
+  .optimizer-toggle-long{display:none}.optimizer-toggle-short{display:inline}
+}
