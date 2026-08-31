@@ -317,7 +317,7 @@ function assertEquivalent(sql, domains, options = {}) {
 
 const numericRows = { a: [null, -1, 0, 1, 2, 5, 10, 20, 21], b: [null, 0, 1, 2] };
 
-const COMPARISON_OPERATORS = ['=', '!=', '<>', 'IN'];
+const COMPARISON_OPERATORS = ['=', '!=', '<>', 'IN', 'NOT IN'];
 const BOOLEAN_OPERATORS = ['AND', 'OR'];
 const TWO_FIELD_PATTERNS = [
   ['a', 'a'], ['a', 'b'], ['b', 'a'], ['b', 'b'],
@@ -329,7 +329,7 @@ const COMBINATORIAL_ROWS = { a: [null, -1, 0, 1, 2, 3], b: [null, -1, 0, 1, 2, 3
 
 function generatedAtom(field, operator, seed) {
   const value = seed % 3;
-  if (operator === 'IN') return `${field} IN (${value}, ${value + 1})`;
+  if (operator === 'IN' || operator === 'NOT IN') return `${field} ${operator} (${value}, ${value + 1})`;
   return `${field} ${operator} ${value}`;
 }
 
@@ -389,6 +389,25 @@ function generatedCombinations() {
   return [...new Set(expressions)];
 }
 
+/* NOT is where UNKNOWN stops behaving like FALSE, so every two-term shape is
+   replayed under one. */
+function negatedCombinations() {
+  const expressions = [];
+  for (const fields of TWO_FIELD_PATTERNS) {
+    for (const firstOperator of COMPARISON_OPERATORS) {
+      for (const secondOperator of COMPARISON_OPERATORS) {
+        for (const booleanOperator of BOOLEAN_OPERATORS) {
+          const left = generatedAtom(fields[0], firstOperator, 0);
+          const right = generatedAtom(fields[1], secondOperator, 1);
+          expressions.push(`NOT (${left} ${booleanOperator} ${right})`);
+          expressions.push(`NOT (${left} ${booleanOperator} ${right}) ${booleanOperator} ${left}`);
+        }
+      }
+    }
+  }
+  return [...new Set(expressions)];
+}
+
 test('optimiser preserves WHERE row selection for every supported simplification', () => {
   const cases = [
     ['duplicate predicates', 'a = 1 AND a = 1', { a: numericRows.a }],
@@ -406,6 +425,22 @@ test('optimiser preserves WHERE row selection for every supported simplification
     ['qualified field', 'orders.a = 1 AND orders.a >= 1', { 'orders.a': [null, 0, 1, 2] }],
     ['string equality set', "status = 'new' OR status = 'paid'", { status: [null, 'new', 'paid', 'closed'] }],
     ['three-valued NOT', 'NOT (a = 1 OR b = 2)', numericRows],
+    ['parent constraint into nested OR', 'a > 10 AND (a > 5 OR b = 1)', numericRows],
+    ['parent constraint kills nested branch', 'a = 1 AND (a = 2 OR b = 1)', numericRows],
+    ['parent constraint through two levels', 'a = 1 AND (b = 1 AND (a = 1 OR b = 2))', numericRows],
+    ['factored common predicate', '(a = 1 AND b = 2) OR (a = 1 AND b = 0)', numericRows],
+    ['NOT IN union', 'a NOT IN (1, 2) AND a NOT IN (2, 3)', { a: numericRows.a }],
+    ['NOT IN intersection', 'a NOT IN (1, 2) OR a NOT IN (2, 3)', { a: numericRows.a }],
+    ['IN minus NOT IN', 'a IN (1, 2, 3) AND a NOT IN (3)', { a: numericRows.a }],
+    ['IN union NOT IN', 'a IN (1, 2) OR a NOT IN (2, 3)', { a: numericRows.a }],
+    ['exclusion contradicting equality', 'a = 1 AND a <> 1', { a: numericRows.a }],
+    ['exclusion implied by a bound', 'a > 5 AND a <> 3', { a: numericRows.a }],
+    ['exhaustive alternatives', 'a = 1 OR a <> 1', { a: numericRows.a }],
+    ['literal constants', 'a = 1 AND TRUE AND (b = 2 OR FALSE)', numericRows],
+    /* UNKNOWN and FALSE are interchangeable under WHERE but not under NOT. */
+    ['negated exhaustive alternatives', 'NOT (a = 1 OR a <> 1)', { a: numericRows.a }],
+    ['negated contradiction', 'NOT (a > 5 AND a < 3)', { a: numericRows.a }],
+    ['negated impossible set', 'NOT (a IN (1, 2) AND a IN (3, 4))', { a: numericRows.a }],
     ['full statement with suffix', 'SELECT id FROM orders WHERE a = 1 OR a = 2 ORDER BY id;', { a: numericRows.a }],
   ];
 
@@ -423,6 +458,25 @@ test('optimiser applies the expected safe rewrites', () => {
     ['a >= 10 AND a < 10', 'FALSE', 'Removed impossible conditions'],
     ['a = 2 OR (a = 2 AND b = 1)', 'a = 2', 'Removed covered branches'],
     ['a BETWEEN 1 AND 10 AND a >= 5', 'a >= 5\nAND\na <= 10', null],
+    ['a > 10 AND (a > 5 OR b = 1)', 'a > 10', 'Removed conditions guaranteed by outer filters'],
+    ['a = 1 AND (a = 2 OR b = 1)', 'a = 1\nAND\nb = 1', 'Removed impossible conditions'],
+    ['a = 1 AND (b = 1 AND (a = 1 OR b = 2))', 'a = 1\nAND\nb = 1', 'Removed conditions guaranteed by outer filters'],
+    /* Factoring hands the OR back to the set merge, which folds it further. */
+    ['(a = 1 AND b = 2) OR (a = 1 AND b = 0)', 'a = 1\nAND\nb IN (2, 0)', 'Factored shared conditions out of OR'],
+    ['(a = 1 AND b = 2) OR (a = 1 AND c = 3)', 'a = 1\nAND\n(\n  b = 2\n  OR\n  c = 3\n)', 'Factored shared conditions out of OR'],
+    /* Factoring a one-token predicate does not pay for the parentheses. */
+    ['(flag AND b = 2) OR (flag AND c = 3)', 'flag\nAND\nb = 2\nOR\nflag\nAND\nc = 3', null],
+    ['a NOT IN (1, 2) AND a NOT IN (2, 3)', 'a NOT IN (1, 2, 3)', 'Tightened ranges'],
+    ['a NOT IN (1, 2) OR a NOT IN (2, 3)', 'a <> 2', 'Merged equality checks into IN'],
+    ['a IN (1, 2, 3) AND a NOT IN (3)', 'a IN (1, 2)', 'Tightened ranges'],
+    ['a IN (1, 2) OR a NOT IN (2, 3)', 'a <> 3', 'Merged equality checks into IN'],
+    ['a = 1 AND a <> 1', 'FALSE', 'Removed impossible conditions'],
+    ['a > 5 AND a <> 3', 'a > 5', 'Tightened ranges'],
+    ['a = 1 OR a <> 1', 'a IS NOT NULL', 'Merged equality checks into IN'],
+    ['a = 1 AND TRUE AND (b = 2 OR FALSE)', 'a = 1\nAND\nb = 2', 'Folded constant conditions'],
+    /* Both of these are UNKNOWN when a is NULL, so neither may collapse. */
+    ['NOT (a = 1 OR a <> 1)', 'NOT (\n  a = 1\n  OR\n  a <> 1\n)', null],
+    ['NOT (a > 5 AND a < 3)', 'NOT (\n  a > 5\n  AND\n  a < 3\n)', null],
   ];
 
   for (const [sql, expected, ruleTitle] of cases) {
@@ -467,9 +521,16 @@ test('does not enable the documented prodid override implicitly', () => {
   assert.deepEqual(tokenKeys(result.optimizedOneLine), tokenKeys(sql));
 });
 
-test('preserves every AND/OR, IN, =, !=, <> and parenthesis combination', () => {
+test('preserves every AND/OR, IN, NOT IN, =, !=, <> and parenthesis combination', () => {
   const expressions = generatedCombinations();
-  assert.equal(expressions.length, 5760, 'the exhaustive matrix should cover every generated combination');
+  assert.equal(expressions.length, 11000, 'the exhaustive matrix should cover every generated combination');
+
+  for (const sql of expressions) assertEquivalent(sql, COMBINATORIAL_ROWS);
+});
+
+test('keeps UNKNOWN distinct from FALSE underneath NOT', () => {
+  const expressions = negatedCombinations();
+  assert.ok(expressions.length > 200, 'the negated matrix should cover every two-term shape');
 
   for (const sql of expressions) assertEquivalent(sql, COMBINATORIAL_ROWS);
 });

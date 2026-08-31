@@ -360,6 +360,8 @@
     ranges: { title: 'Tightened ranges', detail: 'Multiple bounds on the same column were reduced to the strongest safe bound.' },
     sets: { title: 'Merged equality checks into IN', detail: 'Same-column equality alternatives were expressed as one readable set.' },
     impossible: { title: 'Removed impossible conditions', detail: 'Conflicting constraints on the same column can never pass a WHERE filter.' },
+    inherited: { title: 'Removed conditions guaranteed by outer filters', detail: 'A nested condition was already decided by the AND constraints surrounding it.' },
+    factored: { title: 'Factored shared conditions out of OR', detail: 'A condition repeated in every OR branch was written once in front of them.' },
     prodid: { title: 'Grouped prodid conditions', detail: 'Literal prodid filters were collected as OR overrides after the clean SQL.' },
   };
 
@@ -428,7 +430,14 @@
       return { kind: not ? 'notNull' : 'null', field: field.key, fieldTokens: field.tokens, node };
     }
 
-    if (word === 'NOT' && tokens[i + 1] && tokens[i + 1].type === 'word' && tokens[i + 1].value.toUpperCase() === 'IN') return null;
+    if (word === 'NOT' && tokens[i + 1] && tokens[i + 1].type === 'word' && tokens[i + 1].value.toUpperCase() === 'IN') {
+      const list = parseList(tokens, i + 2);
+      if (!list || list.next !== tokens.length || !list.values.length) return null;
+      /* NOT IN (..., NULL) is UNKNOWN or FALSE but never TRUE, so it does not
+         behave like a set complement. Leave that shape alone. */
+      if (hasNullValue(list.values)) return null;
+      return { kind: 'notSet', field: field.key, fieldTokens: field.tokens, values: list.values, node };
+    }
 
     if (word === 'IN') {
       const list = parseList(tokens, i + 1);
@@ -456,6 +465,10 @@
     const value = literalAt(tokens, i + 1);
     if (!value || value.next !== tokens.length) return null;
     const valueData = { tokens: value.tokens, key: tokenKey(value.tokens) };
+    if (word === '<>' || word === '!=') {
+      if (hasNullValue([valueData])) return null;
+      return { kind: 'notSet', field: field.key, fieldTokens: field.tokens, values: [valueData], node };
+    }
     if (word === '=') return { kind: 'eq', field: field.key, fieldTokens: field.tokens, value: valueData, node };
     if (word === '>' || word === '>=') return { kind: 'lower', field: field.key, fieldTokens: field.tokens, op: word, value: valueData, node };
     if (word === '<' || word === '<=') return { kind: 'upper', field: field.key, fieldTokens: field.tokens, op: word, value: valueData, node };
@@ -516,7 +529,25 @@
   function constraintImplies(strong, weak) {
     if (!strong || !weak || strong.field !== weak.field) return false;
     if (weak.kind === 'null') return strong.kind === 'null';
-    if (weak.kind === 'notNull') return ['eq', 'set', 'lower', 'upper', 'range', 'notNull'].includes(strong.kind);
+    if (weak.kind === 'notNull') return ['eq', 'set', 'lower', 'upper', 'range', 'notNull', 'notSet'].includes(strong.kind);
+
+    /* Every excluded literal has to be provably unreachable under `strong`. */
+    if (weak.kind === 'notSet') {
+      const excludes = value => {
+        if (valueComparable(value) === null) return false;
+        if (strong.kind === 'eq') return compareValues(strong.value, value) === 1 || compareValues(strong.value, value) === -1;
+        if (strong.kind === 'set') return strong.values.every(v => compareValues(v, value) === 1 || compareValues(v, value) === -1);
+        if (strong.kind === 'lower' || strong.kind === 'upper') return satisfies(value, strong.op, strong.value) === false;
+        if (strong.kind === 'range') {
+          return satisfies(value, strong.lower.op, strong.lower.value) === false
+            || satisfies(value, strong.upper.op, strong.upper.value) === false;
+        }
+        return false;
+      };
+      if (strong.kind === 'notSet') return weak.values.every(w => strong.values.some(s => equalityValue(s, w)));
+      return weak.values.every(excludes);
+    }
+    if (strong.kind === 'notSet') return false;
 
     if (strong.kind === 'range') {
       if (weak.kind === 'range') return lowerImplies(strong.lower, weak.lower) && upperImplies(strong.upper, weak.upper);
@@ -566,14 +597,67 @@
     return true;
   }
 
-  function makeSetAtom(fieldTokens, values) {
-    const tokens = [...fieldTokens, synthetic('word', 'IN'), synthetic('paren', '(')];
+  function makeSetAtom(fieldTokens, values, negated) {
+    if (values.length === 1) {
+      return {
+        kind: 'atom',
+        tokens: [...fieldTokens, synthetic('op', negated ? '<>' : '='), ...values[0].tokens.map(t => ({ ...t }))],
+      };
+    }
+    const tokens = [...fieldTokens];
+    if (negated) tokens.push(synthetic('word', 'NOT'));
+    tokens.push(synthetic('word', 'IN'), synthetic('paren', '('));
     values.forEach((value, index) => {
       if (index) tokens.push(synthetic('comma', ','));
       tokens.push(...value.tokens.map(t => ({ ...t })));
     });
     tokens.push(synthetic('paren', ')'));
     return { kind: 'atom', tokens };
+  }
+
+  function makeNotNullAtom(fieldTokens) {
+    return {
+      kind: 'atom',
+      tokens: [...fieldTokens, synthetic('word', 'IS'), synthetic('word', 'NOT'), synthetic('word', 'NULL')],
+    };
+  }
+
+  function comparableValues(values) {
+    return values.every(value => valueComparable(value) !== null);
+  }
+
+  function valueListDifference(values, removed) {
+    return values.filter(value => !removed.some(other => equalityValue(value, other)));
+  }
+
+  function valueListIntersection(left, right) {
+    return left.filter(value => right.some(other => equalityValue(value, other)));
+  }
+
+  /* NOT IN / <> literals only merge when every one of them can be compared;
+     otherwise "different key" does not prove "different value" (0x10 and 16)
+     and the original nodes are passed straight through. */
+  function exclusionState(notSets) {
+    const nodes = notSets.map(c => c.node);
+    if (!notSets.length || !notSets.every(c => comparableValues(c.values))) {
+      return { values: null, nodes, single: null };
+    }
+    return {
+      values: notSets.reduce((all, c) => valueListUnion(all, c.values), []),
+      nodes,
+      single: notSets.length === 1 ? notSets[0] : null,
+    };
+  }
+
+  function sameValueSet(left, right) {
+    return left.length === right.length && left.every(value => right.some(other => equalityValue(value, other)));
+  }
+
+  function exclusionNodes(fieldTokens, values, state) {
+    if (values === null) return state.nodes;
+    if (!values.length) return [];
+    if (state.single && sameValueSet(state.single.values, values)) return [state.single.node];
+    return [makeSetAtom(fieldTokens, values, true)];
   }
 
   /* ------------------------------------------------------ prodid grouping */
@@ -748,10 +832,13 @@
     let nullState = null;
     const lowers = [];
     const uppers = [];
+    const notSets = [];
 
     for (const entry of constraints) {
       const c = entry.constraint;
-      if (c.kind === 'null' || c.kind === 'notNull') {
+      if (c.kind === 'notSet') {
+        notSets.push(c);
+      } else if (c.kind === 'null' || c.kind === 'notNull') {
         if (nullState && nullState.kind !== c.kind) {
           addRule(ctx, 'impossible');
           return { impossible: true };
@@ -798,12 +885,20 @@
       addRule(ctx, 'impossible');
       return { impossible: true };
     }
-    if (nullState && nullState.kind === 'null' && (eq || allowed || rangeLower || rangeUpper)) {
+    if (nullState && nullState.kind === 'null' && (eq || allowed || rangeLower || rangeUpper || notSets.length)) {
       addRule(ctx, 'impossible');
       return { impossible: true };
     }
 
+    const exclusions = exclusionState(notSets);
+    /* An exclusion only settles a positive value when both are comparable. */
+    const excluded = exclusions.values;
+
     if (eq) {
+      if (excluded && valueComparable(eq.value) !== null && excluded.some(value => equalityValue(eq.value, value))) {
+        addRule(ctx, 'impossible');
+        return { impossible: true };
+      }
       if (allowed && !allowed.some(value => equalityValue(eq.value, value))) {
         addRule(ctx, 'impossible');
         return { impossible: true };
@@ -817,13 +912,18 @@
         return { impossible: true };
       }
       if (entries.length > 1) addRule(ctx, 'ranges');
-      return { nodes: [eq.node] };
+      /* A surviving equality decides every other bound on the column, so the
+         exclusions are kept only while they cannot be evaluated. */
+      const eqKeeps = excluded === null && valueComparable(eq.value) === null ? exclusions.nodes : [];
+      return { nodes: [eq.node, ...eqKeeps] };
     }
 
     if (allowed) {
       let filtered = allowed.slice();
       if (rangeLower) filtered = filtered.filter(value => satisfies(value, rangeLower.op, rangeLower.value) !== false);
       if (rangeUpper) filtered = filtered.filter(value => satisfies(value, rangeUpper.op, rangeUpper.value) !== false);
+      const setResolves = excluded !== null && comparableValues(filtered);
+      if (setResolves && excluded.length) filtered = valueListDifference(filtered, excluded);
       if (!filtered.length) {
         addRule(ctx, 'impossible');
         return { impossible: true };
@@ -834,13 +934,18 @@
       const setNode = sameAsOriginal && !rangeLower && !rangeUpper
         ? originalSet.node
         : makeSetAtom(field.fieldTokens, filtered);
-      return { nodes: [setNode] };
+      return { nodes: [setNode, ...(setResolves ? [] : exclusions.nodes)] };
     }
 
     const nodes = [];
     if (rangeLower) nodes.push(lowers.find(c => c.op === rangeLower.op && c.value.key === rangeLower.value.key)?.node || makeComparisonNode(field.fieldTokens, rangeLower));
     if (rangeUpper) nodes.push(uppers.find(c => c.op === rangeUpper.op && c.value.key === rangeUpper.value.key)?.node || makeComparisonNode(field.fieldTokens, rangeUpper));
     if (nullState) nodes.push(nullState.node);
+    /* Drop excluded literals the surviving bounds already rule out. */
+    const reachable = excluded === null ? null : excluded.filter(value =>
+      (!rangeLower || satisfies(value, rangeLower.op, rangeLower.value) !== false)
+      && (!rangeUpper || satisfies(value, rangeUpper.op, rangeUpper.value) !== false));
+    nodes.push(...exclusionNodes(field.fieldTokens, reachable, exclusions));
     if (entries.length > nodes.length) addRule(ctx, 'ranges');
     return { nodes };
   }
@@ -854,16 +959,63 @@
 
   /* ------------------------------------------------------------ simplify */
 
-  function simplify(node, ctx) {
-    if (node.kind === 'atom' || node.kind === 'const') return node;
+  /* Two constraints on one column conflict when their AND is unsatisfiable. */
+  function constraintsConflict(left, right) {
+    if (!left || !right || left.field !== right.field) return false;
+    return simplifyConstraintGroup([{ node: left.node }, { node: right.node }], { rules: new Map() }).impossible === true;
+  }
+
+  /* `env` holds the constraints an enclosing AND already guarantees. Using it
+     can turn UNKNOWN into FALSE, which a WHERE filters identically, but NOT
+     would observe the difference - so crossing a NOT drops the environment
+     (env === null) and no propagation happens beneath it. */
+  function applyEnvironment(node, ctx, env) {
+    if (!env || !env.length) return node;
+    const constraint = parseConstraint(node);
+    if (!constraint) return node;
+    for (const outer of env) {
+      if (outer.field !== constraint.field || outer.node === node) continue;
+      if (constraintImplies(outer, constraint)) { addRule(ctx, 'inherited'); return constant(true); }
+      if (constraintsConflict(outer, constraint)) { addRule(ctx, 'impossible'); return constant(false); }
+    }
+    return node;
+  }
+
+  /* A literal TRUE/FALSE written in the SQL, as opposed to one this pass
+     derived. Both are two-valued, so folding them is safe under NOT too. */
+  function constantAtom(node) {
+    const tokens = significant(node.tokens);
+    if (tokens.length !== 1 || tokens[0].type !== 'word') return null;
+    const word = tokens[0].value.toUpperCase();
+    if (word === 'TRUE') return constant(true);
+    if (word === 'FALSE') return constant(false);
+    return null;
+  }
+
+  function simplify(node, ctx, env) {
+    if (node.kind === 'const') return node;
+    if (node.kind === 'atom') {
+      const literal = constantAtom(node);
+      if (literal) { addRule(ctx, 'constants'); return literal; }
+      return applyEnvironment(node, ctx, env);
+    }
     if (node.kind === 'not') {
-      const child = simplify(node.child, ctx);
+      const child = simplify(node.child, ctx, null);
       if (child.kind === 'const') { addRule(ctx, 'constants'); return constant(!child.value); }
       if (child.kind === 'not') { addRule(ctx, 'duplicates'); return child.child; }
       return { kind: 'not', child };
     }
-    const children = node.children.map(child => simplify(child, ctx));
-    return node.kind === 'and' ? simplifyAnd(children, ctx) : simplifyOr(children, ctx);
+    if (node.kind === 'and') {
+      const raw = flatten(node, 'and');
+      /* Atoms see only the outer environment: sibling atoms are merged by
+         simplifyConstraintGroup, which produces tidier SQL than TRUE/FALSE. */
+      const local = env ? raw.map(parseConstraint).filter(Boolean) : [];
+      const children = raw.map(child =>
+        simplify(child, ctx, !env || child.kind === 'atom' ? env : env.concat(local)));
+      return simplifyAnd(children, ctx, env);
+    }
+    /* OR branches may not assume each other, only the surrounding AND. */
+    return simplifyOr(flatten(node, 'or').map(child => simplify(child, ctx, env)), ctx, env);
   }
 
   function uniqueNodes(children, ctx) {
@@ -878,7 +1030,48 @@
     return out;
   }
 
-  function simplifyAnd(rawChildren, ctx) {
+  /* Cost of the rendered predicate in tokens, counting the parentheses
+     renderLines would add. Factoring only wins when this goes down. */
+  function nodeCost(node) {
+    if (node.kind === 'const') return 1;
+    if (node.kind === 'atom') return significant(node.tokens).length;
+    if (node.kind === 'not') return 1 + nodeCost(node.child) + (node.child.kind === 'and' || node.child.kind === 'or' ? 2 : 0);
+    return node.children.reduce(
+      (total, child) => total + nodeCost(child) + (node.kind === 'and' && child.kind === 'or' ? 2 : 0),
+      node.children.length - 1,
+    );
+  }
+
+  /* (A AND B) OR (A AND C) -> A AND (B OR C). Distribution holds in SQL's
+     three-valued logic, so this is only ever a readability decision. */
+  function factorOr(children, ctx) {
+    if (children.length < 2) return null;
+    const branches = children.map(child => flatten(child, 'and'));
+    if (branches.some(branch => branch.length < 2)) return null;
+
+    const shared = new Set(branches[0].map(nodeSignature));
+    for (const branch of branches.slice(1)) {
+      const signatures = new Set(branch.map(nodeSignature));
+      for (const signature of [...shared]) if (!signatures.has(signature)) shared.delete(signature);
+    }
+    if (!shared.size) return null;
+
+    const common = [];
+    const seen = new Set();
+    for (const term of branches[0]) {
+      const signature = nodeSignature(term);
+      if (!shared.has(signature) || seen.has(signature)) continue;
+      seen.add(signature);
+      common.push(term);
+    }
+    const remainders = branches.map(branch => makeLogic('and', branch.filter(term => !shared.has(nodeSignature(term)))));
+    const factored = makeLogic('and', [...common, makeLogic('or', remainders)]);
+    if (nodeCost(factored) >= nodeCost(makeLogic('or', children))) return null;
+    addRule(ctx, 'factored');
+    return factored;
+  }
+
+  function simplifyAnd(rawChildren, ctx, env) {
     let children = flatten({ kind: 'and', children: rawChildren }, 'and');
     if (children.some(child => child.kind === 'const' && !child.value)) { addRule(ctx, 'constants'); return constant(false); }
     if (children.some(child => child.kind === 'const' && child.value)) { addRule(ctx, 'constants'); children = children.filter(child => child.kind !== 'const'); }
@@ -906,7 +1099,14 @@
     const replacements = new Map();
     for (const entries of groups.values()) {
       if (entries.length < 2) continue;
-      const result = simplifyConstraintGroup(entries, ctx);
+      /* An unsatisfiable group is UNKNOWN, not FALSE, when the column is
+         NULL. A WHERE rejects both, but an enclosing NOT does not, so the
+         group is left alone once a NOT has been crossed - and its rules are
+         only reported when the rewrite is actually kept. */
+      const scratch = { rules: new Map() };
+      const result = simplifyConstraintGroup(entries, scratch);
+      if (result.impossible && env === null) continue;
+      scratch.rules.forEach((rule, key) => { if (!ctx.rules.has(key)) ctx.rules.set(key, rule); });
       if (result.impossible) return constant(false);
       entries.forEach((entry, index) => { if (index > 0) consumed.add(entry.index); });
       replacements.set(entries[0].index, result.nodes || []);
@@ -923,7 +1123,38 @@
     return makeLogic('and', children);
   }
 
-  function simplifyOr(rawChildren, ctx) {
+  /* Alternatives on one column collapse to a single set:
+       IN     OR IN        -> IN     (union)
+       NOT IN OR NOT IN    -> NOT IN (intersection)
+       IN     OR NOT IN    -> NOT IN (negatives minus positives)
+     An empty negative set means "any non-NULL value": that turns UNKNOWN into
+     FALSE, which a WHERE cannot tell apart but an enclosing NOT can. */
+  function mergeOrGroup(entries, safe) {
+    const fieldTokens = entries[0].constraint.fieldTokens;
+    const positives = [];
+    const negativeLists = [];
+
+    for (const entry of entries) {
+      const constraint = entry.constraint;
+      if (constraint.kind === 'notSet') { negativeLists.push(constraint.values); continue; }
+      const values = constraint.kind === 'eq' ? [constraint.value] : constraint.values;
+      values.forEach(value => {
+        if (!positives.some(existing => equalityValue(existing, value))) positives.push(value);
+      });
+    }
+
+    if (!negativeLists.length) return positives.length > 1 ? makeSetAtom(fieldTokens, positives) : null;
+    if (!comparableValues(positives) || !negativeLists.every(comparableValues)) return null;
+
+    const negatives = valueListDifference(
+      negativeLists.reduce((all, list) => valueListIntersection(all, list)),
+      positives,
+    );
+    if (!negatives.length) return safe ? makeNotNullAtom(fieldTokens) : null;
+    return makeSetAtom(fieldTokens, negatives, true);
+  }
+
+  function simplifyOr(rawChildren, ctx, env) {
     let children = flatten({ kind: 'or', children: rawChildren }, 'or');
     if (children.some(child => child.kind === 'const' && child.value)) { addRule(ctx, 'constants'); return constant(true); }
     if (children.some(child => child.kind === 'const' && !child.value)) { addRule(ctx, 'constants'); children = children.filter(child => child.kind !== 'const'); }
@@ -942,11 +1173,11 @@
     }
     if (remove.size) children = children.filter((_, index) => !remove.has(index));
 
-    /* Group direct equality/set alternatives into one IN list. */
+    /* Group equality / IN / NOT IN alternatives into one set per column. */
     const groups = new Map();
     children.forEach((child, index) => {
       const constraint = parseConstraint(child);
-      if (!constraint || !['eq', 'set'].includes(constraint.kind)) return;
+      if (!constraint || !['eq', 'set', 'notSet'].includes(constraint.kind)) return;
       if (constraint.kind === 'set' && constraint.values.some(v => v.key.toUpperCase() === 'WORD:NULL')) return;
       if (!groups.has(constraint.field)) groups.set(constraint.field, []);
       groups.get(constraint.field).push({ node: child, constraint, index });
@@ -955,17 +1186,10 @@
     const consumed = new Set();
     for (const entries of groups.values()) {
       if (entries.length < 2) continue;
-      const values = [];
-      entries.forEach(entry => {
-        const valuesToAdd = entry.constraint.kind === 'eq' ? [entry.constraint.value] : entry.constraint.values;
-        valuesToAdd.forEach(value => {
-          if (!values.some(existing => equalityValue(existing, value))) values.push(value);
-        });
-      });
-      if (values.length < 2) continue;
-      replacements.set(entries[0].index, makeSetAtom(entries[0].constraint.fieldTokens, values));
-      entries.slice(1).forEach(entry => consumed.add(entry.index));
-      consumed.add(entries[0].index);
+      const merged = mergeOrGroup(entries, env !== null);
+      if (!merged) continue;
+      replacements.set(entries[0].index, merged);
+      entries.forEach(entry => consumed.add(entry.index));
       addRule(ctx, 'sets');
     }
     if (replacements.size) {
@@ -986,7 +1210,7 @@
       }
     }
     if (finalRemove.size) children = children.filter((_, index) => !finalRemove.has(index));
-    return makeLogic('or', children);
+    return factorOr(children, ctx) || makeLogic('or', children);
   }
 
   /* ----------------------------------------------------------- rendering */
@@ -1043,7 +1267,15 @@
 
     const ctx = { rules: new Map() };
     const prepared = options.groupProdid ? groupProdid(tree, ctx) : tree;
-    const finalTree = simplify(prepared, ctx);
+    /* Each pass can expose work for the others (a factored branch becomes a
+       new AND, a merged set makes a sibling redundant), so run to a fixed
+       point. nodeSignature is canonical, and the cap keeps it deterministic. */
+    let finalTree = simplify(prepared, ctx, []);
+    let previous = nodeSignature(prepared);
+    for (let pass = 0; pass < 10 && nodeSignature(finalTree) !== previous; pass++) {
+      previous = nodeSignature(finalTree);
+      finalTree = simplify(finalTree, ctx, []);
+    }
     const optimized = assemble(target, prettyExpression(finalTree));
     const optimizedOneLine = renderTokens(lex(optimized)).trim();
     return {
