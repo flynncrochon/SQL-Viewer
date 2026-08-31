@@ -474,6 +474,13 @@ test('optimiser applies the expected safe rewrites', () => {
     ['a > 5 AND a <> 3', 'a > 5', 'Tightened ranges'],
     ['a = 1 OR a <> 1', 'a IS NOT NULL', 'Merged equality checks into IN'],
     ['a = 1 AND TRUE AND (b = 2 OR FALSE)', 'a = 1\nAND\nb = 2', 'Folded constant conditions'],
+    /* NOT over a single comparison flips the operator; groups stay untouched. */
+    ["NOT region NOT IN ('NSW', 'VIC')", "region IN ('NSW', 'VIC')", 'Pushed NOT into the comparison'],
+    ["NOT account_status <> 'Active'", "account_status = 'Active'", 'Pushed NOT into the comparison'],
+    ['NOT a IS NULL', 'a IS NOT NULL', 'Pushed NOT into the comparison'],
+    ['NOT a > 5', 'a <= 5', 'Pushed NOT into the comparison'],
+    ['NOT (a = 1 AND b = 2)', 'NOT (\n  a = 1\n  AND\n  b = 2\n)', null],
+    ['NOT a IN (1, NULL)', 'NOT a IN (1, NULL)', null],
     /* Both of these are UNKNOWN when a is NULL, so neither may collapse. */
     ['NOT (a = 1 OR a <> 1)', 'NOT (\n  a = 1\n  OR\n  a <> 1\n)', null],
     ['NOT (a > 5 AND a < 3)', 'NOT (\n  a > 5\n  AND\n  a < 3\n)', null],

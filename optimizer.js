@@ -362,6 +362,7 @@
     impossible: { title: 'Removed impossible conditions', detail: 'Conflicting constraints on the same column can never pass a WHERE filter.' },
     inherited: { title: 'Removed conditions guaranteed by outer filters', detail: 'A nested condition was already decided by the AND constraints surrounding it.' },
     factored: { title: 'Factored shared conditions out of OR', detail: 'A condition repeated in every OR branch was written once in front of them.' },
+    negated: { title: 'Pushed NOT into the comparison', detail: 'A negated comparison was rewritten with the opposite operator instead of being wrapped in NOT.' },
     prodid: { title: 'Grouped prodid conditions', detail: 'Literal prodid filters were collected as OR overrides after the clean SQL.' },
   };
 
@@ -473,6 +474,33 @@
     if (word === '>' || word === '>=') return { kind: 'lower', field: field.key, fieldTokens: field.tokens, op: word, value: valueData, node };
     if (word === '<' || word === '<=') return { kind: 'upper', field: field.key, fieldTokens: field.tokens, op: word, value: valueData, node };
     return null;
+  }
+
+  const NEGATED_OP = { '=': '<>', '<>': '=', '!=': '=', '<': '>=', '>=': '<', '>': '<=', '<=': '>' };
+
+  /* NOT (field OP literal) -> field NEGATED-OP literal, one comparison at a
+     time - no De Morgan expansion over AND/OR. Exact in three-valued logic:
+     a NULL operand leaves both forms UNKNOWN. parseConstraint gates the
+     shape, so NULL inside an IN list is left alone. */
+  function negateAtom(node) {
+    if (!node || node.kind !== 'atom' || !parseConstraint(node)) return null;
+    const tokens = significant(node.tokens);
+    const i = fieldAt(tokens).next;
+    const word = canonicalToken(tokens[i]).toUpperCase();
+    const splice = (at, remove, ...insert) => {
+      const out = tokens.slice();
+      out.splice(at, remove, ...insert);
+      return { kind: 'atom', tokens: out };
+    };
+    if (NEGATED_OP[word]) return splice(i, 1, synthetic(tokens[i].type, NEGATED_OP[word]));
+    if (word === 'IN') return splice(i, 0, synthetic('word', 'NOT'));
+    if (word === 'NOT') return splice(i, 1);
+    if (word === 'IS') {
+      return canonicalToken(tokens[i + 1]).toUpperCase() === 'NOT'
+        ? splice(i + 1, 1)
+        : splice(i + 1, 0, synthetic('word', 'NOT'));
+    }
+    return null; /* ponytail: BETWEEN stays as-is, NOT BETWEEN is no shorter. */
   }
 
   function valueComparable(value) {
@@ -1000,6 +1028,9 @@
       return applyEnvironment(node, ctx, env);
     }
     if (node.kind === 'not') {
+      /* One comparison only: NOT flips the operator, never expands over AND/OR. */
+      const flipped = negateAtom(node.child);
+      if (flipped) { addRule(ctx, 'negated'); return simplify(flipped, ctx, env); }
       const child = simplify(node.child, ctx, null);
       if (child.kind === 'const') { addRule(ctx, 'constants'); return constant(!child.value); }
       if (child.kind === 'not') { addRule(ctx, 'duplicates'); return child.child; }
