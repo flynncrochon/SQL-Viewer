@@ -34,7 +34,10 @@
 - SQL syntax highlighting and bracket folding.
 - Live T-SQL and Access SQL validation.
 - `WHERE` optimisation for duplicates, ranges, constants, and equality sets.
-- Optional `prodid` grouping for literal `OR` overrides.
+- Optional `prodid` grouping for literal overrides into one `IN` and one
+  `NOT IN` predicate.
+- Column matching is case-insensitive, including bracketed identifiers; text
+  literals are folded case-insensitively when equality sets are merged.
 
 ## Tests
 
@@ -45,4 +48,11 @@ Run the tests locally with:
 
 ```bash
 npm test
+npm run test:sql
 ```
+
+The SQLite differential suite requires Python 3. It executes the original and
+optimised statements against the same generated in-memory rows, checking
+exact row selection in normal mode. Grouped mode additionally checks that
+explicit overrides collapse to at most one positive and one negative `prodid`
+predicate; its connected-condition changes are intentional.

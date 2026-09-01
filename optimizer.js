@@ -117,12 +117,37 @@
     return tokens.filter(t => t.type !== 'comment');
   }
 
+  /* SQL identifiers are normally case-insensitive. Keep the original token
+     for rendering, but use one semantic spelling for optimiser comparisons so
+     `prodid`, `PRODID`, and `[prodid]` share the same constraint group. */
+  function identifierName(token) {
+    if (!token) return '';
+    const value = token.value || '';
+    if (token.type !== 'qid') return value;
+    if (value[0] === '[' && value[value.length - 1] === ']') return value.slice(1, -1).replace(/]]/g, ']');
+    if ((value[0] === '`' || value[0] === '"') && value[value.length - 1] === value[0]) {
+      return value.slice(1, -1).replace(new RegExp(value[0] + value[0], 'g'), value[0]);
+    }
+    return value;
+  }
+
+  function stringLiteralName(value) {
+    if (!value || value.length < 2) return value;
+    const quote = value[0];
+    if ((quote !== "'" && quote !== '"') || value[value.length - 1] !== quote) return value;
+    return value.slice(1, -1).replace(new RegExp(quote + quote, 'g'), quote);
+  }
+
   function canonicalToken(t) {
     return t.type === 'word' ? t.value.toUpperCase() : t.value;
   }
 
   function tokenKey(tokens) {
-    return significant(tokens).map(t => `${t.type}:${canonicalToken(t)}`).join('|');
+    return significant(tokens).map(t => {
+      if (t.type === 'qid') return `word:${identifierName(t).toUpperCase()}`;
+      if (t.type === 'str') return `str:${stringLiteralName(t.value).toUpperCase()}`;
+      return `${t.type}:${canonicalToken(t)}`;
+    }).join('|');
   }
 
   function needsSpace(prev, cur, compact = false) {
@@ -363,7 +388,7 @@
     inherited: { title: 'Removed conditions guaranteed by outer filters', detail: 'A nested condition was already decided by the AND constraints surrounding it.' },
     factored: { title: 'Factored shared conditions out of OR', detail: 'A condition repeated in every OR branch was written once in front of them.' },
     negated: { title: 'Pushed NOT into the comparison', detail: 'A negated comparison was rewritten with the opposite operator instead of being wrapped in NOT.' },
-    prodid: { title: 'Grouped prodid conditions', detail: 'Literal prodid filters were collected as OR overrides after the clean SQL.' },
+    prodid: { title: 'Grouped prodid conditions', detail: 'Literal prodid filters were collected into one positive override and one global exclusion.' },
   };
 
   function addRule(ctx, key) {
@@ -510,7 +535,10 @@
       if (Number.isFinite(number)) return { type: 'number', value: number };
     }
     if ((text[0] === "'" && text[text.length - 1] === "'") || (text[0] === '"' && text[text.length - 1] === '"')) {
-      return { type: 'string', value: text.slice(1, -1).replace(new RegExp(text[0] + text[0], 'g'), text[0]) };
+      /* The target databases use case-insensitive text comparisons. Preserve
+         the first literal's spelling in the rendered SQL, but compare folded
+         text for set merging, implication, ranges, and duplicate removal. */
+      return { type: 'string', value: stringLiteralName(text).toUpperCase() };
     }
     return null;
   }
@@ -650,6 +678,15 @@
     };
   }
 
+  function dedupeLiteralSet(node, ctx) {
+    const constraint = parseConstraint(node);
+    if (!constraint || !['set', 'notSet'].includes(constraint.kind)) return node;
+    const values = valueListUnique(constraint.values);
+    if (values.length === constraint.values.length) return node;
+    addRule(ctx, 'duplicates');
+    return makeSetAtom(constraint.fieldTokens, values, constraint.kind === 'notSet');
+  }
+
   function comparableValues(values) {
     return values.every(value => valueComparable(value) !== null);
   }
@@ -693,15 +730,6 @@
   /* The regular constraint simplifier intentionally leaves NOT IN, <> and !=
      alone. This optional pass extracts those explicit literal prodid filters
      as manual OR overrides; arbitrary SQL is left untouched. */
-
-  function identifierName(token) {
-    if (!token) return '';
-    const value = token.value || '';
-    if (token.type !== 'qid') return value;
-    if (value[0] === '[' && value[value.length - 1] === ']') return value.slice(1, -1).replace(/]]/g, ']');
-    if ((value[0] === '`' || value[0] === '"') && value[value.length - 1] === value[0]) return value.slice(1, -1).replace(new RegExp(value[0] + value[0], 'g'), value[0]);
-    return value;
-  }
 
   function isProdidField(field) {
     const last = field && field.tokens && field.tokens[field.tokens.length - 1];
@@ -791,8 +819,11 @@
 
   /* Remove recognized prodid predicates from the clean expression. A branch
      containing only prodid predicates has no clean counterpart, so it returns
-     null instead of becoming TRUE. NOT expressions are left intact because a
-     negated prodid predicate is outside this toggle's explicit forms. */
+     null instead of becoming TRUE. Both positive manual overrides and
+     negative exclusions are collected from every boolean branch so grouped
+     mode emits one global IN and one global NOT IN. NOT expressions are left
+     intact because their prodid predicate is not an explicit form of this
+     toggle. */
   function stripProdidConditions(node, collected) {
     if (node.kind === 'atom') {
       const condition = parseProdidConstraint(node);
@@ -812,9 +843,8 @@
        while keeping the surviving siblings would widen the branch to every row
        they match on their own (Prodcode = 31 AND prodid IN (...) would become
        a bare Prodcode = 31). A stripped OR child is safe to keep because what
-       is left still matches a subset of the rows it did before, and a negative
-       list narrows rather than widens and is re-applied globally, so neither
-       one forces the branch out. */
+       is left still matches a subset of the rows it did before. Negative
+       exclusions are intentionally hoisted globally by grouped mode. */
     if (node.kind === 'and' && children.some(child => child.tookPositive)) return null;
 
     const remaining = children.map(child => child.result).filter(child => child !== null);
@@ -1031,9 +1061,10 @@
   function simplify(node, ctx, env) {
     if (node.kind === 'const') return node;
     if (node.kind === 'atom') {
-      const literal = constantAtom(node);
+      const normalized = dedupeLiteralSet(node, ctx);
+      const literal = constantAtom(normalized);
       if (literal) { addRule(ctx, 'constants'); return literal; }
-      return applyEnvironment(node, ctx, env);
+      return applyEnvironment(normalized, ctx, env);
     }
     if (node.kind === 'not') {
       /* One comparison only: NOT flips the operator, never expands over AND/OR. */
@@ -1280,6 +1311,16 @@
     return renderLines(node, 0).join('\n');
   }
 
+  function simplifyFixedPoint(tree, ctx) {
+    let finalTree = simplify(tree, ctx, []);
+    let previous = nodeSignature(tree);
+    for (let pass = 0; pass < 10 && nodeSignature(finalTree) !== previous; pass++) {
+      previous = nodeSignature(finalTree);
+      finalTree = simplify(finalTree, ctx, []);
+    }
+    return finalTree;
+  }
+
   function assemble(target, expression) {
     const tail = renderTokens(target.suffix).trim();
     if (target.mode === 'predicate') return tail ? `${expression}${tail === ';' ? ';' : `\n${tail}`}` : expression;
@@ -1309,12 +1350,7 @@
     /* Each pass can expose work for the others (a factored branch becomes a
        new AND, a merged set makes a sibling redundant), so run to a fixed
        point. nodeSignature is canonical, and the cap keeps it deterministic. */
-    let finalTree = simplify(prepared, ctx, []);
-    let previous = nodeSignature(prepared);
-    for (let pass = 0; pass < 10 && nodeSignature(finalTree) !== previous; pass++) {
-      previous = nodeSignature(finalTree);
-      finalTree = simplify(finalTree, ctx, []);
-    }
+    const finalTree = simplifyFixedPoint(prepared, ctx);
     const optimized = assemble(target, prettyExpression(finalTree));
     const optimizedOneLine = renderTokens(lex(optimized)).trim();
     return {

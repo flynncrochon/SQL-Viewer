@@ -7,7 +7,7 @@
 <link rel="icon" type="image/svg+xml" href="icons/sql-viewer-brackets-vscode-balanced.svg">
 <meta name="description" content="Paste SQL, see it broken down by bracket depth, and review safe logical optimisations.">
 <link rel="preconnect" href="https://cdn.jsdelivr.net">
-<link rel="stylesheet" href="styles.css?v=prodid-group-1">
+<link rel="stylesheet" href="styles.css?v=bracket-select-2">
 </head>
 <body>
   <header class="bar">
@@ -28,6 +28,7 @@
       <div class="editor" id="srcEditor">
         <div class="hovline" id="srcHov"></div>
         <div class="curline" id="srcCur"></div>
+        <div class="matchlayer" id="srcMatch" aria-hidden="true"></div>
         <div class="gutter" id="srcGut" aria-hidden="true"><div class="gutter-in" id="srcGutIn"></div></div>
         <pre class="mirror wrap" id="srcMirror" aria-hidden="true"></pre>
         <textarea id="src" spellcheck="false" autocomplete="off" autocapitalize="off"
@@ -39,6 +40,7 @@
       <div class="editor" id="fmtEditor">
         <div class="hovline" id="fmtHov"></div>
         <div class="curline" id="fmtCur"></div>
+        <div class="matchlayer" id="fmtMatch" aria-hidden="true"></div>
         <div class="diagline" id="fmtDiagLine" aria-hidden="true"></div>
         <div class="diag-label" id="fmtDiagLabel" aria-hidden="true"></div>
         <div class="gutter" id="fmtGut"><div class="gutter-in" id="fmtGutIn"></div></div>
@@ -74,7 +76,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/node-sql-parser@5.4.0/umd/mysql.umd.js" defer></script>
-<script src="app.js?v=scroll-lock-7" defer></script>
+<script src="app.js?v=bracket-select-2" defer></script>
 <script src="optimizer.js?v=prodid-group-1" defer></script>
 </body>
 </html>

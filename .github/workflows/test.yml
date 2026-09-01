@@ -20,5 +20,13 @@ jobs:
         with:
           node-version: 20
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
       - name: Run tests
         run: npm test
+
+      - name: Run SQLite differential tests
+        run: python3 test/optimizer_sqlite.py

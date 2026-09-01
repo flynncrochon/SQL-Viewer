@@ -493,6 +493,31 @@ test('optimiser applies the expected safe rewrites', () => {
   }
 });
 
+test('matches column identifiers case-insensitively, including bracketed names', () => {
+  const cases = [
+    ['a = 1 AND A = 1', 'a = 1'],
+    ['[a] = 1 OR A = 2', '[a] IN (1, 2)'],
+    ['[a] >= 1 AND A > 2', 'A > 2'],
+    ['[a] IS NULL AND A IS NOT NULL', 'FALSE'],
+  ];
+
+  for (const [sql, expected] of cases) {
+    const result = optimiseSql(sql);
+    assert.equal(result.error, undefined, sql);
+    assert.equal(result.optimizedOneLine, expected, sql);
+  }
+});
+
+test('folds case-insensitive text literals when merging sets', () => {
+  const list = optimiseSql('Brand IN ("Dermaveen Daily Nourish", "Goat", "GOAT", "The Goat Skincare")');
+  assert.equal(list.error, undefined);
+  assert.equal(list.optimizedOneLine, 'Brand IN ("Dermaveen Daily Nourish", "Goat", "The Goat Skincare")');
+
+  const alternatives = optimiseSql('brand = "Goat" OR BRAND = "GOAT"');
+  assert.equal(alternatives.error, undefined);
+  assert.equal(alternatives.optimizedOneLine, 'brand = "Goat"');
+});
+
 test('preserves unsupported predicate logic and statement tokens', () => {
   const cases = [
     'SELECT * FROM t WHERE a <> 1 AND b != 2;',
@@ -565,4 +590,25 @@ test('keeps the siblings of a hoisted NOT IN and of a stripped OR arm', () => {
   const arm = optimiseSql("Prodcode = 31 AND (Brand = 'x' OR prodid IN (1))", { groupProdid: true });
   assert.equal(arm.error, undefined);
   assert.ok(tokenKeys(arm.optimizedOneLine).includes('num:31'), arm.optimizedOneLine);
+});
+
+test('groups all prodid exclusions into one global NOT IN', () => {
+  const result = optimiseSql('a = 0 OR prodid != 1 OR [PRODID] NOT IN (2, 3)', { groupProdid: true });
+  assert.equal(result.error, undefined);
+  assert.equal(result.optimizedOneLine, 'a = 0 AND prodid NOT IN (1, 2, 3)');
+});
+
+test('emits one positive and one negative prodid group across branches', () => {
+  const sql = `
+    (Prodcode = 28 AND Brand IN ("Dermaveen") OR Prodid IN (1, 2, 2))
+      AND Prodid NOT IN (3, 4)
+    OR (Prodcode = 56 AND Brand IN ("Dermaveen Daily Nourish")
+      AND PRODID NOT IN (5, 6))
+    OR [prodid] IN (7, 8)
+  `;
+  const result = optimiseSql(sql, { groupProdid: true });
+  assert.equal(result.error, undefined);
+  assert.match(result.optimizedOneLine, /Prodid IN \(1, 2, 7, 8\)/i);
+  assert.match(result.optimizedOneLine, /Prodid NOT IN \(3, 4, 5, 6\)/i);
+  assert.equal((result.optimizedOneLine.match(/(?:\bprodid\b|\[prodid\])/gi) || []).length, 2);
 });

@@ -955,12 +955,14 @@ const srcMirror = document.getElementById('srcMirror');
 const srcEditor = document.getElementById('srcEditor');
 const srcGutIn = document.getElementById('srcGutIn');
 const srcCur = document.getElementById('srcCur');
+const srcMatch = document.getElementById('srcMatch');
 
 const fmt = document.getElementById('fmt');
 const fmtMirror = document.getElementById('fmtMirror');
 const fmtEditor = document.getElementById('fmtEditor');
 const fmtGutIn = document.getElementById('fmtGutIn');
 const fmtCur = document.getElementById('fmtCur');
+const fmtMatch = document.getElementById('fmtMatch');
 const srcHov = document.getElementById('srcHov');
 const fmtHov = document.getElementById('fmtHov');
 const fmtDiagLine = document.getElementById('fmtDiagLine');
@@ -1700,13 +1702,14 @@ function paintCaretLine(mirrorEl, editorEl, curEl, text, idx, on) {
   curEl.style.top = `${rowTop - editorEl.getBoundingClientRect().top + wrapped * lh}px`;
 }
 
-function syncCarets(navigate = false, brackets = true) {
+function syncCarets(navigate = false) {
   const onSrc = document.activeElement === src;
   const onFmt = document.activeElement === fmt;
   if (!onSrc && !onFmt) {
     srcCur.style.display = 'none';
     fmtCur.style.display = 'none';
     clearBrackets();
+    paintMatches();
     return;
   }
 
@@ -1733,7 +1736,8 @@ function syncCarets(navigate = false, brackets = true) {
 
   paintCaretLine(srcMirror, srcEditor, srcCur, src.value, atSrc, true);
   paintCaretLine(fmtMirror, fmtEditor, fmtCur, fmt.value, atFmt, true);
-  if (brackets) markBrackets();
+  paintMatches();
+  markBrackets();
 }
 
 /* ---- the row under the pointer ---- */
@@ -1780,42 +1784,275 @@ function refreshHoverLine(editorEl, mirrorEl, hovEl) {
   paintHoverLine(editorEl, mirrorEl, hovEl, y);
 }
 
-/* ---- bracket pair under the caret ---- */
+/* ---- the bracket pair around the caret ---- */
 
 function clearBrackets() {
   document.querySelectorAll('.p.hit').forEach(n => n.classList.remove('hit'));
+}
+
+/* Only the bracket offsets are wanted, so this walks characters rather than
+   paying for a full tokenize on every keystroke. Comments and quoted runs are
+   skipped exactly as the tokenizer skips them, which is what keeps the Nth
+   bracket here the same bracket as the Nth `data-p` in the mirror. */
+let parenScan = { text: null, parens: null };
+
+function parenPositions(text) {
+  if (parenScan.text === text) return parenScan.parens;
+
+  const parens = [];
+  const n = text.length;
+  let i = 0;
+  while (i < n) {
+    const c = text[i];
+
+    if ((c === '-' && text[i + 1] === '-') || c === '#') {          // -- and # to EOL
+      const nl = text.indexOf('\n', i);
+      i = nl < 0 ? n : nl;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '*') {                          // block comment
+      const close = text.indexOf('*/', i + 2);
+      i = close < 0 ? n : close + 2;
+      continue;
+    }
+    if (c === "'" || c === '"' || c === '`' || c === '[') {          // strings and quoted ids
+      const close = c === '[' ? ']' : c;
+      const escaped = c !== '`' && c !== '[';                        // \ and doubling
+      let j = i + 1;
+      while (j < n) {
+        if (escaped && text[j] === '\\') { j += 2; continue; }
+        if (text[j] === close) {
+          if (escaped && text[j + 1] === close) { j += 2; continue; }
+          j++;
+          break;
+        }
+        j++;
+      }
+      i = j;
+      continue;
+    }
+    if (c === '(' || c === ')') parens.push({ ord: parens.length, at: i, open: c === '(' });
+    i++;
+  }
+
+  parenScan = { text, parens };
+  return parens;
+}
+
+/* The pair to light up: whichever bracket the caret is sitting on, or failing
+   that the innermost pair the caret is inside. Brackets close from the inside
+   out, so the first pair to close around the caret is the innermost one. */
+function bracketPairAt(text, caret) {
+  const open = [];
+  let touching = null, around = null;
+
+  for (const p of parenPositions(text)) {
+    if (p.open) { open.push(p); continue; }
+    const start = open.pop();
+    if (!start) continue;                       // a stray ) closing nothing
+
+    if (!touching
+      && (start.at === caret || start.at === caret - 1 || p.at === caret || p.at === caret - 1)) {
+      touching = [start.ord, p.ord];
+    } else if (!around && start.at < caret && caret <= p.at) {
+      around = [start.ord, p.ord];
+    }
+  }
+  return touching || around;
 }
 
 function markBrackets() {
   clearBrackets();
   const ta = document.activeElement;
   if (ta !== fmt && ta !== src) return;
+
+  /* Mid-edit on a large document the mirror is rebuilt as plain text, with no
+     token spans to mark and stale `data-p` numbering on the rows the fast path
+     did not touch. The idle repaint puts the highlighted mirror back. */
   const mirrorEl = ta === fmt ? fmtMirror : srcMirror;
+  if ((ta === fmt ? fmtMirrorMode : sourceMirrorMode) !== 'highlighted') return;
 
-  const caret = ta.selectionStart;
-  const parens = [];
-  let pos = 0;
-  for (const tk of tokensFor(ta.value)) {
-    if (tk.t === 'paren') parens.push({ ord: parens.length, at: pos, v: tk.v });
-    pos += tk.v.length;
-  }
-  const hit = parens.find(p => p.at === caret || p.at === caret - 1);
-  if (!hit) return;
-
-  const stack = [];
-  for (const p of parens) {
-    if (p.v === '(') { stack.push(p); continue; }
-    const open = stack.pop();
-    if (!open) continue;
-    if (open.ord === hit.ord || p.ord === hit.ord) {
-      for (const ord of [open.ord, p.ord]) {
-        const el = mirrorEl.querySelector(`.p[data-p="${ord}"]`);
-        if (el) el.classList.add('hit');
-      }
-      return;
-    }
+  const pair = bracketPairAt(ta.value, ta.selectionStart);
+  if (!pair) return;
+  for (const ord of pair) {
+    const el = mirrorEl.querySelector(`.p[data-p="${ord}"]`);
+    if (el) el.classList.add('hit');
   }
 }
+
+/* ---- words ---- */
+
+/* VS Code's default word separators. Chrome's own breaker reads
+   "119410,119422" as a single number - comma and all, the way it would read
+   "1,234" - which is both the wrong thing to double-click and the wrong thing
+   to highlight, so word boundaries are decided here instead. */
+const WORD_BREAK = '`~!@#$%^&*()-=+[{]}\\|;:\'",.<>/?';
+const isWordChar = c => c > ' ' && !WORD_BREAK.includes(c);
+
+/* The word `at` sits in, or null if that is a bracket or a run of spaces.
+   Landing on the right half of a character puts the offset just past it, so
+   the character before is tried as well. */
+function wordRangeAt(text, at) {
+  const seed = isWordChar(text[at]) ? at : isWordChar(text[at - 1]) ? at - 1 : -1;
+  if (seed < 0) return null;   // a bracket or a run of spaces
+
+  let start = seed, end = seed + 1;
+  while (start > 0 && isWordChar(text[start - 1])) start--;
+  while (end < text.length && isWordChar(text[end])) end++;
+  return [start, end];
+}
+
+/* ---- other runs of the selected text ---- */
+
+/* Two VS Code behaviours over one mechanism.
+
+   "Selection highlight": select something and every other copy of it picks up
+   a faint box. "Occurrence highlight": with nothing selected, the word the
+   caret sits in and all of its copies pick up a fainter one - whole words
+   only, and including the word under the caret, which has no selection over
+   it to stand in for a box.
+
+   The mirrors are the only place the text is really laid out, so the boxes are
+   measured off the rendered rows and drawn into their own layer underneath the
+   textarea - the live selection, which the textarea paints itself, still wins
+   wherever the two overlap. */
+const MATCH_MAX_LEN = 200;    // a paragraph-sized selection is not a word
+const MATCH_MAX_BOXES = 600;  // a screenful is nowhere near this many
+
+/* The occurrence highlight follows the caret, so left to itself it would box
+   every word as you typed it - the caret is inside a word for most of the time
+   you are writing one. Only putting the caret somewhere deliberately, by
+   clicking, arms it; the next keystroke puts it away again. A selection is
+   always deliberate, so the selection highlight ignores this. */
+let wordHighlightArmed = false;
+
+function selectionNeedle() {
+  const ta = document.activeElement;
+  if (ta !== src && ta !== fmt) return null;
+
+  const value = ta.value;
+  let from = ta.selectionStart, to = ta.selectionEnd, kind = 'match';
+  if (from === to) {
+    if (!wordHighlightArmed) return null;
+    const word = wordRangeAt(value, from);
+    if (!word) return null;   // caret in whitespace or on a bracket
+    [from, to] = word;
+    kind = 'word';
+  }
+  if (to - from > MATCH_MAX_LEN) return null;
+
+  const text = value.slice(from, to);
+  // a multi-line drag is a range rather than a word; VS Code skips those too
+  if (!text.trim() || text.includes('\n')) return null;
+
+  const upto = value.slice(0, from);
+  return {
+    ta,
+    kind,
+    text: text.toLowerCase(),
+    line: (upto.match(/\n/g) || []).length,
+    col: from - (upto.lastIndexOf('\n') + 1),
+  };
+}
+
+function paintMatches() {
+  const need = selectionNeedle();
+  // measure both panes before either is written, so this costs one layout
+  const srcHtml = matchBoxes(srcEditor, srcMirror, need, need !== null && need.ta === src);
+  const fmtHtml = matchBoxes(fmtEditor, fmtMirror, need, need !== null && need.ta === fmt);
+  const cls = need && need.kind === 'word' ? 'matchlayer words' : 'matchlayer';
+  for (const [layer, html] of [[srcMatch, srcHtml], [fmtMatch, fmtHtml]]) {
+    if (layer.className !== cls) layer.className = cls;
+    if (layer.innerHTML !== html) layer.innerHTML = html;
+  }
+}
+
+/* The first row whose bottom edge is past `y`. Row tops only ever increase, so
+   a binary search finds the viewport without touching every row. */
+function firstRowBelow(rows, y) {
+  let lo = 0, hi = rows.length - 1, found = rows.length;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    if (rows[mid].getBoundingClientRect().bottom > y) { found = mid; hi = mid - 1; }
+    else lo = mid + 1;
+  }
+  return found;
+}
+
+/* Only the rows on screen are measured. Highlighting a common word in a long
+   document would otherwise cost a client rect per occurrence, and the layer is
+   rebuilt on every scroll anyway. */
+function matchBoxes(editorEl, mirrorEl, need, focused) {
+  const rows = mirrorEl.children;
+  if (!need || !rows.length) return '';
+
+  const editorRect = editorEl.getBoundingClientRect();
+  const lh = parseFloat(getComputedStyle(mirrorEl).lineHeight);
+  const first = firstRowBelow(rows, editorRect.top);
+  const len = need.text.length;
+  const whole = need.kind === 'word';
+  let html = '', boxes = 0;
+
+  for (let i = first; i < rows.length && boxes < MATCH_MAX_BOXES; i++) {
+    const row = rows[i];
+    const rowTop = row.getBoundingClientRect().top;
+    if (rowTop >= editorRect.bottom) break;
+
+    const hay = row.textContent.toLowerCase();
+    for (let at = hay.indexOf(need.text); at >= 0; at = hay.indexOf(need.text, at + len)) {
+      /* A caret in `119410` should not light up the tail of `2119410`, but a
+         selection is taken at its word, exactly as the user drew it. */
+      if (whole && (isWordChar(hay[at - 1]) || isWordChar(hay[at + len]))) continue;
+      // the selected copy is already blue; the caret's own copy still wants a box
+      if (!whole && focused && i === need.line && at === need.col) continue;
+      html += matchBoxesFor(rangeSpan(row, at, at + len), editorRect, rowTop, lh);
+      if (++boxes >= MATCH_MAX_BOXES) break;
+    }
+  }
+  return html;
+}
+
+/* A range crossing two token spans reports a rect per span, and a soft-wrapped
+   match reports one per visual row. Merge by row so a match reads as a single
+   box, and snap each box to the row grid - the raw rects describe the glyph
+   box, which sits a couple of pixels inside the line box. */
+function matchBoxesFor(range, editorRect, rowTop, lh) {
+  const wraps = new Map();
+  for (const r of range.getClientRects()) {
+    if (!r.width || !r.height) continue;
+    const wrapped = Math.round((r.top - rowTop) / lh);
+    const box = wraps.get(wrapped);
+    if (!box) wraps.set(wrapped, { left: r.left, right: r.right });
+    else {
+      box.left = Math.min(box.left, r.left);
+      box.right = Math.max(box.right, r.right);
+    }
+  }
+
+  let html = '';
+  for (const [wrapped, box] of wraps) {
+    const top = rowTop + wrapped * lh - editorRect.top;
+    html += `<i style="left:${box.left - editorRect.left}px;top:${top}px`
+      + `;width:${box.right - box.left}px;height:${lh}px"></i>`;
+  }
+  return html;
+}
+
+/* Like rangeAt, but over a span of the row rather than a single caret point. */
+function rangeSpan(row, from, to) {
+  const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+  const range = document.createRange();
+  range.selectNodeContents(row);
+  let node, acc = 0, open = false;
+  while ((node = walker.nextNode())) {
+    const len = node.nodeValue.length;
+    if (!open && acc + len > from) { range.setStart(node, from - acc); open = true; }
+    if (open && acc + len >= to) { range.setEnd(node, to - acc); break; }
+    acc += len;
+  }
+  return range;
+}
+
 
 function textEdit(before, after) {
   let start = 0;
@@ -2162,7 +2399,7 @@ function fromSrc() {
   doc = formatSql(sql);
   fmt.value = formattedText(doc.lines);
   paintFmt();
-  syncCarets(true, false);
+  syncCarets(true);
   scheduleValidate(sql);
   finishHistoryAction('src');
 }
@@ -2266,7 +2503,7 @@ function fromFmt() {
   if (useFast && paintRawFast(change)) {
     if (hasFolds) repaintRawFoldedGutter();
     if (sourceNeedsPaint) scheduleFastEditFrame();
-    else syncCarets(true, false);
+    else syncCarets(true);
     scheduleIdleEditPaint();
   } else {
     if (sourceNeedsPaint) {
@@ -2275,7 +2512,7 @@ function fromFmt() {
     const reuseGutter = rawGutterMode === rawMode
     && fmt.value.split('\n').length === fmtMirror.children.length;
     paintRaw(reuseGutter);
-    syncCarets(true, false);
+    syncCarets(true);
     if (sourceMirrorMode !== 'highlighted') scheduleIdleEditPaint();
   }
   scheduleValidate(sql);
@@ -2342,7 +2579,7 @@ function scheduleFastEditFrame() {
     if (paintedSourceValue !== src.value) {
       if (shouldUseFastEdit(src.value)) paintSrcFast(); else paintSrc();
     }
-    syncCarets(true, false);
+    syncCarets(true);
   });
 }
 
@@ -2358,7 +2595,7 @@ function scheduleIdleEditPaint() {
     } else if (fmtMirrorMode !== 'highlighted') {
       paintFmtRaw();
     }
-    syncCarets(false, true);
+    syncCarets(false);
   }, 120);
 }
 
@@ -2372,7 +2609,7 @@ function scheduleFoldedRender() {
     const reuseGutter = rawGutterMode === 'raw-folded'
       && fmt.value.split('\n').length === fmtMirror.children.length;
     paintFmtRawFolded(reuseGutter);
-    syncCarets(true, false);
+    syncCarets(true);
   });
 }
 
@@ -2502,7 +2739,7 @@ function scheduleHistoryCleanPaint() {
     if (historyApplying || fmtDirty) return;
     if (sourceMirrorMode !== 'highlighted' || paintedSourceValue !== src.value) paintSrc();
     if (fmtMirrorMode !== 'highlighted' || rawGutterMode !== 'formatted') paintFmt();
-    syncCarets(false, true);
+    syncCarets(false);
   }, 120);
 }
 
@@ -2583,7 +2820,7 @@ function restoreHistoryState(state) {
     src.scrollLeft = state.srcScrollLeft;
     fmt.scrollTop = state.fmtScrollTop;
     fmt.scrollLeft = state.fmtScrollLeft;
-    syncCarets(false, false);
+    syncCarets(false);
     syncScroll(src, srcMirror, srcGutIn);
     syncScroll(fmt, fmtMirror, fmtGutIn);
     schedulePersist(state.source);
@@ -2753,7 +2990,7 @@ function deleteCollapsedFold(inputType) {
     }
     /* The last fold needs a gutter rebuild so its arrow is removed too. */
     paintFmtRaw(false);
-    syncCarets(true, false);
+    syncCarets(true);
   }
   scheduleValidate(sql);
   finishHistoryAction('fmt-block');
@@ -2996,6 +3233,110 @@ for (const ta of [src, fmt]) {
     if (e.key !== 'Enter' || e.ctrlKey || e.metaKey || e.altKey) return;
     e.preventDefault();
     insertIndentedEnter(ta);
+  });
+}
+
+/* A click is the one caret move that asks for the word under it to be
+   highlighted. Typing is not, and neither is the caret landing mid-word while
+   an edit reflows the text around it. */
+for (const ta of [src, fmt]) {
+  ta.addEventListener('mousedown', () => { wordHighlightArmed = true; });
+  ta.addEventListener('input', () => { wordHighlightArmed = false; });
+}
+
+/* ---- double click selects one word ---- */
+
+/* Which character the pointer is over. The caret the browser leaves behind
+   cannot answer that: it snaps to the nearer boundary, so clicking `)` and
+   clicking the `5` in front of it both land on the offset between them. That
+   is fine for words, which are wide, but not for picking out one bracket. The
+   mirror lays the text out at the same pixels as the textarea, so the column
+   can be read straight off it. Returns -1 if the point is past the text. */
+function offsetAtPoint(mirrorEl, text, clientX, clientY) {
+  const rows = mirrorEl.children;
+  let lo = 0, hi = rows.length - 1, row = -1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const r = rows[mid].getBoundingClientRect();
+    if (clientY < r.top) hi = mid - 1;
+    else if (clientY >= r.bottom) lo = mid + 1;
+    else { row = mid; break; }
+  }
+  const starts = textLineStarts(text);
+  if (row < 0 || row >= starts.length) return -1;
+
+  const rowEl = rows[row];
+  const rowTop = rowEl.getBoundingClientRect().top;
+  const lh = parseFloat(getComputedStyle(mirrorEl).lineHeight);
+  const wrapped = Math.max(0, Math.floor((clientY - rowTop) / lh));
+  const len = (row + 1 < starts.length ? starts[row + 1] - 1 : text.length) - starts[row];
+
+  /* Character boundaries run left to right within a visual row and top to
+     bottom between them, so they are ordered and can be searched. The last
+     boundary at or before the pointer is where the character under it starts. */
+  const atOrBefore = col => {
+    const r = rangeAt(rowEl, col).getBoundingClientRect();
+    const line = Math.round((r.top - rowTop) / lh);
+    return line < wrapped || (line === wrapped && r.left <= clientX);
+  };
+  lo = 0; hi = len;
+  while (lo < hi) {
+    const mid = (lo + hi + 1) >> 1;
+    if (atOrBefore(mid)) lo = mid; else hi = mid - 1;
+  }
+  return starts[row] + lo;
+}
+
+/* What a double click on that character should take. A word if it is part of
+   one, and otherwise just itself: a separator is its own word, so clicking a
+   bracket takes that bracket. Chrome instead reaches past it for whatever run
+   of whitespace or punctuation surrounds it, which on a closing bracket at the
+   end of a line means selecting the line break. Whitespace is left to the
+   browser, which already selects the run of it and has nothing to get wrong. */
+function doubleClickRange(text, at) {
+  const c = text[at];
+  if (c === undefined || c <= ' ') return null;
+  return isWordChar(c) ? wordRangeAt(text, at) : [at, at + 1];
+}
+
+/* The browser widens the selection on the second mousedown. Correcting that on
+   dblclick means correcting it on mouseup, so the wrong word stays on screen
+   for as long as the button is held down; a frame callback instead runs in the
+   rendering steps, before the browser paints, and the wider word is never
+   actually shown.
+
+   The default is deliberately left to run. Preventing it would take the wrong
+   word off the screen too, but it also cancels double-click-drag - holding the
+   button after the second click and pulling down to extend the selection - and
+   that is the browser's to do, not ours. */
+for (const ta of [src, fmt]) {
+  ta.addEventListener('mousedown', e => {
+    if (e.button !== 0 || e.detail !== 2) return;
+    if (ta.selectionStart !== ta.selectionEnd) return;   // the pair began as a drag
+    const mirrorEl = ta === fmt ? fmtMirror : srcMirror;
+    const over = offsetAtPoint(mirrorEl, ta.value, e.clientX, e.clientY);
+    const take = over >= 0
+      ? doubleClickRange(ta.value, over)
+      : wordRangeAt(ta.value, ta.selectionStart);   // clicked past the text
+    if (!take) return;                    // on whitespace: let the browser decide
+
+    /* Once the pointer starts moving the selection belongs to the drag, not to
+       the browser's guess at a word, so leave it alone. A drag that creeps off
+       slowly enough to be missed here corrects itself: the next mousemove
+       overwrites whatever this put back. */
+    const stop = new AbortController();
+    let dragged = false;
+    window.addEventListener('mousemove', m => {
+      if (Math.abs(m.clientX - e.clientX) > 2 || Math.abs(m.clientY - e.clientY) > 2) dragged = true;
+    }, { capture: true, signal: stop.signal });
+    window.addEventListener('mouseup', () => stop.abort(), { capture: true, signal: stop.signal });
+
+    requestAnimationFrame(() => {
+      stop.abort();
+      if (dragged) return;
+      if (ta.selectionStart === take[0] && ta.selectionEnd === take[1]) return;
+      ta.setSelectionRange(take[0], take[1]);
+    });
   });
 }
 

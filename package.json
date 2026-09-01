@@ -3,6 +3,7 @@
   "private": true,
   "license": "MIT",
   "scripts": {
-    "test": "node --test"
+    "test": "node --test",
+    "test:sql": "python test/optimizer_sqlite.py"
   }
 }
