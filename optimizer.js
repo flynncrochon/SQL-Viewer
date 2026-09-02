@@ -1969,6 +1969,168 @@
     setTimeout(() => { button.textContent = label; button.classList.remove('copied'); }, 1000);
   }
 
+  /* ---- double click selects one word, exactly as the panes behind do ---- */
+
+  /* VS Code's word separators, the same list the editor uses. Chrome's own
+     breaker reads "119410,119422" as one number - comma and all - and reaches
+     past a closing bracket for the line break behind it, so a double click in
+     here would take something a double click in the source pane never would. */
+  const SELECT_WORD_BREAK = '`~!@#$%^&*()-=+[{]}\\|;:\'",.<>/?';
+  const isSelectWordChar = ch => ch > ' ' && !SELECT_WORD_BREAK.includes(ch);
+
+  /* One rendered line's text, with the text node every character came from.
+     Struck runs are mapped too but flagged: they are user-select:none, so a
+     drag skips them and a double click must not reach into them either. */
+  function lineMap(row) {
+    const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+    const parts = [];
+    let text = '', node;
+    while ((node = walker.nextNode())) {
+      const value = node.nodeValue;
+      if (!value) continue;
+      parts.push({
+        node, at: text.length, len: value.length,
+        selectable: !node.parentElement.closest('.diff-removed'),
+      });
+      text += value;
+    }
+    return { text, parts };
+  }
+
+  function selectableAt(map, col) {
+    for (const part of map.parts) {
+      if (col >= part.at && col < part.at + part.len) return part.selectable;
+    }
+    return false;
+  }
+
+  /* Column -> the DOM point a range boundary goes at. */
+  function pointAt(map, col) {
+    for (const part of map.parts) {
+      if (col <= part.at + part.len) return { node: part.node, offset: col - part.at };
+    }
+    return null;
+  }
+
+  /* A collapsed range at that column, for measuring where the character sits. */
+  function caretRect(map, col) {
+    const point = pointAt(map, col);
+    if (!point) return null;
+    const range = document.createRange();
+    range.setStart(point.node, point.offset);
+    range.collapse(true);
+    return range.getBoundingClientRect();
+  }
+
+  /* Which character the pointer is over, as a column in the line it is on. The
+     caret the browser would leave behind cannot answer that: it snaps to the
+     nearer boundary, so pressing on `)` and on the character in front of it
+     both land on the offset between them - fine for a word, wrong for picking
+     out one bracket. The line boxes are the real layout, so read it off them.
+     Returns null above, below or past the end of the text. */
+  function characterAtPoint(clientX, clientY) {
+    const rows = code.children;
+    let lo = 0, hi = rows.length - 1, row = -1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const r = rows[mid].getBoundingClientRect();
+      if (clientY < r.top) hi = mid - 1;
+      else if (clientY >= r.bottom) lo = mid + 1;
+      else { row = mid; break; }
+    }
+    if (row < 0) return null;
+
+    const rowEl = rows[row];
+    const map = lineMap(rowEl);
+    if (!map.parts.length) return null;                 // a blank line: only a <br>
+    const rowTop = rowEl.getBoundingClientRect().top;
+    const lh = parseFloat(getComputedStyle(code).lineHeight);
+    const wrapped = Math.max(0, Math.floor((clientY - rowTop) / lh));
+
+    /* Character boundaries run left to right within a wrapped row and top to
+       bottom between them, so they are ordered and can be searched. The last
+       boundary at or before the pointer is where the character under it
+       starts. */
+    const atOrBefore = col => {
+      const r = caretRect(map, col);
+      if (!r) return false;
+      const line = Math.round((r.top - rowTop) / lh);
+      return line < wrapped || (line === wrapped && r.left <= clientX);
+    };
+    lo = 0; hi = map.text.length;
+    while (lo < hi) {
+      const mid = (lo + hi + 1) >> 1;
+      if (atOrBefore(mid)) lo = mid; else hi = mid - 1;
+    }
+    return { map, col: lo };
+  }
+
+  /* What a double click on that character should take. A word if it is part of
+     one, and otherwise just itself: a separator is its own word, so clicking a
+     bracket takes that bracket. Whitespace is left to the browser, which
+     already selects the run of it and has nothing to get wrong. A word never
+     grows into struck text, so a rewritten value sitting against the one it
+     replaced still gives one word per click. */
+  function doubleClickRange(map, at) {
+    const ch = map.text[at];
+    if (ch === undefined || ch <= ' ') return null;
+    if (!isSelectWordChar(ch)) return [at, at + 1];
+    let start = at, end = at + 1;
+    while (start > 0 && isSelectWordChar(map.text[start - 1]) && selectableAt(map, start - 1)) start--;
+    while (end < map.text.length && isSelectWordChar(map.text[end]) && selectableAt(map, end)) end++;
+    return [start, end];
+  }
+
+  /* The browser widens the selection on the second mousedown. Correcting that
+     on dblclick means correcting it on mouseup, so the wrong word stays on
+     screen for as long as the button is held down; a frame callback instead
+     runs in the rendering steps, before the browser paints, and the wider word
+     is never actually shown.
+
+     The default is deliberately left to run. Preventing it would take the
+     wrong word off the screen too, but it also cancels double-click-drag -
+     holding the button after the second click and pulling down to extend the
+     selection - and that is the browser's to do, not ours. */
+  code.addEventListener('mousedown', event => {
+    if (event.button !== 0 || event.detail !== 2) return;
+    const selection = window.getSelection();
+    if (!selection || !selection.isCollapsed) return;   // the pair began as a drag
+    const hit = characterAtPoint(event.clientX, event.clientY);
+    if (!hit) return;
+    if (!selectableAt(hit.map, hit.col)) return;        // struck text is scenery
+    const take = doubleClickRange(hit.map, hit.col);
+    if (!take) return;                    // on whitespace: let the browser decide
+
+    /* Once the pointer starts moving the selection belongs to the drag, not to
+       the browser's guess at a word, so leave it alone. A drag that creeps off
+       slowly enough to be missed here corrects itself: the next mousemove
+       overwrites whatever this put back. */
+    const stop = new AbortController();
+    let dragged = false;
+    window.addEventListener('mousemove', m => {
+      if (Math.abs(m.clientX - event.clientX) > 2 || Math.abs(m.clientY - event.clientY) > 2) dragged = true;
+    }, { capture: true, signal: stop.signal });
+    window.addEventListener('mouseup', () => stop.abort(), { capture: true, signal: stop.signal });
+
+    requestAnimationFrame(() => {
+      stop.abort();
+      if (dragged) return;
+      const from = pointAt(hit.map, take[0]), to = pointAt(hit.map, take[1]);
+      if (!from || !to) return;
+      const range = document.createRange();
+      range.setStart(from.node, from.offset);
+      range.setEnd(to.node, to.offset);
+      const live = window.getSelection();
+      if (!live) return;
+      const current = live.rangeCount === 1 ? live.getRangeAt(0) : null;
+      if (current
+        && current.compareBoundaryPoints(Range.START_TO_START, range) === 0
+        && current.compareBoundaryPoints(Range.END_TO_END, range) === 0) return;
+      live.removeAllRanges();
+      live.addRange(range);
+    });
+  });
+
   window.addEventListener('sqlviewer-open-optimizer', event => {
     const detail = event.detail || {};
     if (Array.isArray(detail.commentMarkers)) lineCommentMarkers = detail.commentMarkers.slice();
