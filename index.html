@@ -6,7 +6,7 @@
 <title>SQL Viewer</title>
 <link rel="icon" type="image/svg+xml" href="icons/sql-viewer-brackets-vscode-balanced.svg">
 <meta name="description" content="Paste SQL, see it broken down by bracket depth, and review safe logical optimisations.">
-<link rel="stylesheet" href="styles.css?v=unified-diff-1">
+<link rel="stylesheet" href="styles.css?v=unified-diff-2">
 </head>
 <body>
   <header class="bar">
@@ -42,6 +42,11 @@
     </div>
 
     <div class="settings-head settings-subhead">
+      <span>Wrap long lines</span>
+      <button class="settings-switch" id="settingsWrap" type="button" role="switch" aria-checked="true" aria-label="Wrap long lines"></button>
+    </div>
+
+    <div class="settings-head settings-subhead">
       <span>Comment markers</span>
     </div>
     <ul class="settings-markers" id="settingsMarkers"></ul>
@@ -60,7 +65,7 @@
         <div class="boxlayer" id="srcBox" aria-hidden="true"></div>
         <div class="gutter" id="srcGut" aria-hidden="true"><div class="gutter-in" id="srcGutIn"></div></div>
         <pre class="mirror wrap" id="srcMirror" aria-hidden="true"></pre>
-        <textarea id="src" spellcheck="false" autocomplete="off" autocapitalize="off"
+        <textarea id="src" class="wrap" spellcheck="false" autocomplete="off" autocapitalize="off"
                   autocorrect="off" wrap="soft" aria-label="SQL source"></textarea>
       </div>
     </section>

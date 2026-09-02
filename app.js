@@ -130,6 +130,16 @@ function loadGroupColumn() {
   return DEFAULT_GROUP_COLUMN;
 }
 
+/* Whether long source lines soft-wrap or the pane scrolls sideways, off the
+   gear popover. Wrapping keeps a pasted one-liner readable; turning it off is
+   what makes a column selection down that text a plain rectangle again. */
+const WRAP_KEY = 'sqlviewer.wrapSource';
+let wrapSource = loadWrapSource();
+
+function loadWrapSource() {
+  try { return localStorage.getItem(WRAP_KEY) !== 'off'; } catch { return true; }
+}
+
 function atLineStart(text, i) {
   for (let j = i - 1; j >= 0; j--) {
     const c = text[j];
@@ -1150,6 +1160,20 @@ function setStatus(state, text) {
   statusEl.disabled = !clickable;
   statusEl.title = clickable ? `${text}. Click to show the next error.` : text;
   statusEl.setAttribute('aria-label', text || 'SQL validity check');
+  updateOptimiserButton(state);
+}
+
+/* The optimiser rewrites SQL it has parsed, so it stays greyed out until the
+   syntax check passes. A check that could not run at all - no Worker, parser
+   missing - is not evidence of broken SQL, so the button stays available. */
+function updateOptimiserButton(state) {
+  const empty = !src.value.trim();
+  const enabled = state === 'ok' || (state === '' && !empty);
+  optimiserButton.disabled = !enabled;
+  optimiserButton.title = enabled ? 'Open SQL Optimiser'
+    : empty ? 'Paste some SQL to use the optimiser'
+    : state === 'checking' ? 'Checking syntax...'
+    : 'Fix the SQL syntax errors to use the optimiser';
 }
 
 function clearDiagnostics() {
@@ -1325,6 +1349,11 @@ function showDiagnostic(index) {
    it cannot always scroll as far. Let the mirror's clamped value win and push it
    back into the textarea: the gutter follows the textarea, and if the two drift
    the numbers slide out of step with the rows they are numbering. */
+/* The last scroll offsets syncScroll pushed into each mirror. A mirror scroll
+   event carrying these is just the echo of our own write; anything else came
+   from outside the app and has to be adopted. */
+const mirrorSynced = new WeakMap();
+
 function syncScroll(ta, mirrorEl, gutInEl) {
   /* The mirror hides its scrollbar, while the textarea does not. Once a soft-
      wrapped document becomes tall enough to scroll, that otherwise gives the
@@ -1345,6 +1374,7 @@ function syncScroll(ta, mirrorEl, gutInEl) {
   mirrorEl.scrollLeft = ta.scrollLeft;
   const top = mirrorEl.scrollTop;
   if (top !== ta.scrollTop) ta.scrollTop = top;   // settles in one bounce
+  mirrorSynced.set(mirrorEl, { top, left: mirrorEl.scrollLeft });
   gutInEl.style.transform = `translateY(${-top}px)`;
   refreshHoverLine(ta === fmt ? fmtEditor : srcEditor, mirrorEl, ta === fmt ? fmtHov : srcHov);
 }
@@ -1827,7 +1857,12 @@ function revealCaret(ta, mirrorEl, text, idx) {
   const cs = getComputedStyle(mirrorEl);
   const lh = parseFloat(cs.lineHeight);
   const padTop = parseFloat(cs.paddingTop);
-  const padBottom = parseFloat(cs.paddingBottom);
+  /* The formatted pane can carry temporary trailing space to keep a fold
+     anchored (setFmtScrollPadding). That is empty scroll room, not a visual
+     inset: counting it here shrank the viewport this test uses and dragged
+     rows that were plainly on screen back up to the top. */
+  const padBottom = parseFloat(cs.paddingBottom)
+    - (mirrorEl === fmtMirror ? fmtScrollPadding : 0);
   const padLeft = parseFloat(cs.paddingLeft);
   const padRight = parseFloat(cs.paddingRight);
   const editorRect = ta.getBoundingClientRect();
@@ -1874,26 +1909,63 @@ function rangeAt(row, col) {
   return r;
 }
 
-function paintCaretLine(mirrorEl, editorEl, curEl, text, idx, on) {
-  if (!on) { curEl.style.display = 'none'; return; }
+/* The top of the visual row a caret sits on, in client coordinates, or null
+   when that line is not rendered.
+
+   A collapsed range reports the glyph box, which sits a couple of pixels
+   below the line box - taking it as-is left the text riding high in its own
+   highlight. Use it only to pick which wrapped row we are on, then snap to
+   the row grid. */
+function caretRowTop(mirrorEl, text, idx) {
   const upto = text.slice(0, idx);
   const line = (upto.match(/\n/g) || []).length;
   const col = idx - (upto.lastIndexOf('\n') + 1);
   const row = mirrorEl.children[line];
-  if (!row) { curEl.style.display = 'none'; return; }
+  if (!row) return null;
 
-  /* A collapsed range reports the glyph box, which sits a couple of pixels
-     below the line box - taking it as-is left the text riding high in its own
-     highlight. Use it only to pick which wrapped row we are on, then snap to
-     the row grid. */
   const lh = parseFloat(getComputedStyle(mirrorEl).lineHeight);
   const rowTop = row.getBoundingClientRect().top;
   const rect = rangeAt(row, col).getBoundingClientRect();
   const wrapped = rect.height ? Math.round((rect.top - rowTop) / lh) : 0;
+  return rowTop + wrapped * lh;
+}
 
+function paintCaretLine(mirrorEl, editorEl, curEl, text, idx, on) {
+  if (!on) { curEl.style.display = 'none'; return; }
+  const top = caretRowTop(mirrorEl, text, idx);
+  if (top === null) { curEl.style.display = 'none'; return; }
+
+  const lh = parseFloat(getComputedStyle(mirrorEl).lineHeight);
   curEl.style.display = 'block';
   curEl.style.height = `${lh}px`;
-  curEl.style.top = `${rowTop - editorEl.getBoundingClientRect().top + wrapped * lh}px`;
+  curEl.style.top = `${top - editorEl.getBoundingClientRect().top}px`;
+}
+
+/* The caret row of the pane being driven, but only while it is on screen. A
+   caret that has been scrolled out of view is a poor anchor - matching it
+   would push the other pane somewhere neither row can be read. */
+function anchorRowTop(ta, mirrorEl, text, idx) {
+  const top = caretRowTop(mirrorEl, text, idx);
+  if (top === null) return null;
+  const rect = ta.getBoundingClientRect();
+  return top >= rect.top && top < rect.bottom ? top : null;
+}
+
+/* Put the mapped row on the same screen row as the one the caret is on, so a
+   clause and its expansion sit side by side instead of being separated by
+   however far the two documents have drifted apart.
+
+   Best effort: near either end of a document the pane clamps and the rows end
+   up as close as the scroll range allows. revealCaret still runs afterwards,
+   so a clamped pane at least keeps the mapped caret on screen. */
+function alignRow(ta, mirrorEl, text, idx, anchorTop) {
+  if (anchorTop === null) return;
+  const top = caretRowTop(mirrorEl, text, idx);
+  if (top === null) return;
+  const delta = top - anchorTop;
+  if (Math.abs(delta) < 0.5) return;
+  ta.scrollTop += delta;
+  mirrorEl.scrollTop = ta.scrollTop;
 }
 
 /* While a selection is being extended - dragging with the mouse or holding
@@ -1926,15 +1998,19 @@ function syncCarets(navigate = false) {
 
   if (navigate) {
     if (onSrc) {
+      const anchorTop = anchorRowTop(src, srcMirror, src.value, atSrc);
       if (fmt.selectionStart !== atFmt || fmt.selectionEnd !== atFmt) {
         fmt.setSelectionRange(atFmt, atFmt);
       }
+      alignRow(fmt, fmtMirror, fmt.value, atFmt, anchorTop);
       revealCaret(fmt, fmtMirror, fmt.value, atFmt);
       syncScroll(fmt, fmtMirror, fmtGutIn);
     } else if (onFmt) {
+      const anchorTop = anchorRowTop(fmt, fmtMirror, fmt.value, atFmt);
       if (src.selectionStart !== atSrc || src.selectionEnd !== atSrc) {
         src.setSelectionRange(atSrc, atSrc);
       }
+      alignRow(src, srcMirror, src.value, atSrc, anchorTop);
       revealCaret(src, srcMirror, src.value, atSrc);
       syncScroll(src, srcMirror, srcGutIn);
     }
@@ -3079,6 +3155,7 @@ function consumeHistoryInput(e) {
 /* The optimiser receives a snapshot. Its overlay can experiment visually, but
    the viewer itself is never changed by opening or viewing it. */
 function openOptimizer() {
+  if (optimiserButton.disabled) return;
   window.dispatchEvent(new CustomEvent('sqlviewer-open-optimizer', {
     detail: {
       sql: src.value,
@@ -3609,14 +3686,17 @@ function caretHtml(rows, starts, text, at, pad, editorRect, lh, cw) {
 
 /* ---- the drag ---- */
 
-/* Which visual row and column the pointer is over, clamped rather than
-   refused: a drag that leaves the text still has a corner, and it is the
-   nearest one. A soft-wrapped line is several rows here, one per `seg`. */
+/* Which line and column the pointer is over, clamped rather than refused: a
+   drag that leaves the text still has a corner, and it is the nearest one.
+
+   A column selection runs down logical lines, so the column returned counts
+   from the start of the line even when the pointer is on a row that line
+   wrapped onto - `seg` is only how far into the line that row begins. */
 function pointToRowCol(pane, clientX, clientY) {
   const text = pane.ta.value;
   const starts = textLineStarts(text);
   const rows = pane.mirror.children;
-  if (!rows.length) return { row: 0, seg: 0, col: 0 };
+  if (!rows.length) return { row: 0, col: 0 };
 
   let row;
   if (clientY < rows[0].getBoundingClientRect().top) row = 0;
@@ -3642,30 +3722,31 @@ function pointToRowCol(pane, clientX, clientY) {
   const segs = segmentsFor(ctx, rowEl, text.slice(lineStart, lineEnd));
   const seg = Math.max(0, Math.min(segs.length - 1,
     Math.floor((clientY - rowRect.top) / ctx.lh)));
-  const col = Math.max(0, Math.round((clientX - rowRect.left) / ctx.cw));
-  return { row, seg, col };
+  const col = segs[seg][0] + Math.max(0, Math.round((clientX - rowRect.left) / ctx.cw));
+  return { row, col };
 }
 
-/* One caret per visual row between the two corners. A row too short to reach
-   the box keeps its caret out at the column anyway, held there by `pad` -
-   virtual columns past the end of the line. That is what makes the set read as
-   one straight vertical line down ragged text instead of following each line's
-   end, and typing pads the short lines out so the text lands in the column
-   too. `padL` and `padR` carry the same idea for the box's two edges, so the
-   rectangle keeps its shape over short and empty lines.
+/* One caret per logical line between the two corners - the rows a line wrapped
+   onto are part of that line, not lines of their own, so a box down wrapped
+   text cuts the same columns a box down the unwrapped text would. Over a line
+   that does wrap, the run those columns name can start on one visual row and
+   end on another, so the drawn shape follows the text rather than staying a
+   rectangle; that is the honest picture of what is selected.
+
+   A line too short to reach the box keeps its caret out at the column anyway,
+   held there by `pad` - virtual columns past the end of the line. That is what
+   makes the set read as one straight vertical line down ragged text instead of
+   following each line's end, and typing pads the short lines out so the text
+   lands in the column too. `padL` and `padR` carry the same idea for the box's
+   two edges, so it keeps its shape over short and empty lines.
 
    `headAt` is where in the set the corner being dragged ended up, which is
    what keeps the view scrolled to the pointer rather than to the far end. */
 function boxCarets(pane, anchor, head) {
   const text = pane.ta.value;
   const starts = textLineStarts(text);
-  const rows = pane.mirror.children;
-  const ctx = wrapContext(pane);
-  const ahead = anchor.row < head.row || (anchor.row === head.row && anchor.seg <= head.seg);
-  const top = ahead ? anchor : head;
-  const bottom = ahead ? head : anchor;
-  const firstRow = Math.min(top.row, starts.length - 1);
-  const lastRow = Math.min(bottom.row, starts.length - 1);
+  const firstRow = Math.min(anchor.row, head.row, starts.length - 1);
+  const lastRow = Math.min(Math.max(anchor.row, head.row), starts.length - 1);
   const left = Math.min(anchor.col, head.col);
   const right = Math.max(anchor.col, head.col);
   const out = [];
@@ -3673,34 +3754,20 @@ function boxCarets(pane, anchor, head) {
 
   for (let r = firstRow; r <= lastRow; r++) {
     const [lineStart, lineEnd] = lineBounds(text, starts, r);
-    const segs = segmentsFor(ctx, rows[r], text.slice(lineStart, lineEnd));
-    const from = r === firstRow ? Math.min(top.seg, segs.length - 1) : 0;
-    const to = r === lastRow ? Math.min(bottom.seg, segs.length - 1) : segs.length - 1;
-    for (let i = from; i <= to; i++) {
-      const [cs, ce] = segs[i];
-      const len = ce - cs;
-      const base = lineStart + cs;
-      /* Only the row a line ends on can be padded. A caret held out past the
-         end of a wrapped row would type into the middle of the line, not past
-         its end, so those stop where their own row's text does. The space a
-         row wrapped at belongs to the row it closes but is drawn with no width
-         at all, so a caret stopping at the end of one goes before it - landing
-         on it would read as having jumped to the start of the next row. */
-      const tail = i === segs.length - 1;
-      let stop = len;
-      if (!tail) while (stop > 0 && text[base + stop - 1] === ' ') stop--;
-      const s = base + Math.min(left, stop);
-      const e = base + Math.min(right, stop);
-      const padL = tail ? Math.max(0, left - len) : 0;
-      const padR = tail ? Math.max(0, right - len) : 0;
-      if (r === head.row && i === Math.min(head.seg, segs.length - 1)) headAt = out.length;
-      /* The caret goes on the left edge whichever way the box was dragged. That
-         is the column you are about to type in, and it is the edge that has to
-         stay in view - anchoring on the far side would scroll a wide box off to
-         the right and put every caret where the text ends up rather than where
-         it starts. */
-      out.push({ a: e, h: s, pad: padL, padL, padR });
-    }
+    const len = lineEnd - lineStart;
+    const padL = Math.max(0, left - len);
+    const padR = Math.max(0, right - len);
+    if (r === head.row) headAt = out.length;
+    /* The caret goes on the left edge whichever way the box was dragged. That
+       is the column you are about to type in, and it is the edge that has to
+       stay in view - anchoring on the far side would scroll a wide box off to
+       the right and put every caret where the text ends up rather than where
+       it starts. */
+    out.push({
+      a: lineStart + Math.min(right, len),
+      h: lineStart + Math.min(left, len),
+      pad: padL, padL, padR,
+    });
   }
   return { carets: out, headAt };
 }
@@ -4215,9 +4282,29 @@ fmt.addEventListener('scroll', () => {
 });
 fmtEditor.addEventListener('wheel', keepFmtWheelInsideBoundary, { passive: false, capture: true });
 
-/* The textarea is the only scroll source. The mirror is pointer-events:none
-   with a hidden scrollbar, so letting it write back a delayed scrollTop can
-   undo a legitimate move (especially when returning down after scrolling up). */
+/* The textarea is the only scroll source the app itself drives. The mirror is
+   pointer-events:none with a hidden scrollbar, so letting it write back a
+   delayed scrollTop can undo a legitimate move (especially when returning down
+   after scrolling up) - which is why this adopts a mirror offset only when it
+   is not the echo of syncScroll's own write.
+
+   The mirror is still overflow:auto, so it is a real scroller as far as the
+   browser is concerned. Native find-in-page matches the mirror's copy of the
+   text and scrolls it directly, firing no textarea scroll event: the gutter,
+   carets and overlays all hang off that event, so the pane ends up showing one
+   row while numbering another. Hand the move back to the textarea and let its
+   scroll event resync everything the usual way. */
+for (const [ta, mirrorEl] of [[src, srcMirror], [fmt, fmtMirror]]) {
+  mirrorEl.addEventListener('scroll', () => {
+    const last = mirrorSynced.get(mirrorEl);
+    const top = mirrorEl.scrollTop, left = mirrorEl.scrollLeft;
+    if (last && top === last.top && left === last.left) return;   // our own write
+    if (top === ta.scrollTop && left === ta.scrollLeft) return;   // already in step
+    mirrorSynced.set(mirrorEl, { top, left });
+    ta.scrollTop = top;
+    ta.scrollLeft = left;
+  });
+}
 
 for (const [ed, mirrorEl, hovEl] of [[srcEditor, srcMirror, srcHov], [fmtEditor, fmtMirror, fmtHov]]) {
   ed.addEventListener('mousemove', e => {
@@ -4539,6 +4626,36 @@ const settingsMarkers = document.getElementById('settingsMarkers');
 const settingsForm = document.getElementById('settingsAddForm');
 const settingsInput = document.getElementById('settingsMarkerInput');
 const settingsGroupColumn = document.getElementById('settingsGroupColumn');
+const settingsWrap = document.getElementById('settingsWrap');
+
+/* The markup starts wrapped, so this only has to undo that - but it writes
+   both sides every time, because mirror and textarea wrapping at different
+   columns is what puts the caret off the text. The `wrap` attribute is set
+   alongside the class so the element still describes itself correctly to
+   anything reading it; the class is what the layout actually follows. */
+function renderWrapSource() {
+  src.classList.toggle('wrap', wrapSource);
+  srcMirror.classList.toggle('wrap', wrapSource);
+  src.wrap = wrapSource ? 'soft' : 'off';
+  settingsWrap.setAttribute('aria-checked', String(wrapSource));
+}
+
+/* Where the lines break changes, so everything measured off the old layout is
+   stale: the same reset a resize does, plus a repaint to re-measure the gutter
+   entries, which are as tall as the rows their line now takes. */
+function applyWrapSource(on) {
+  if (on === wrapSource) return;
+  wrapSource = on;
+  try { localStorage.setItem(WRAP_KEY, on ? 'on' : 'off'); } catch { /* storage may be unavailable */ }
+  renderWrapSource();
+  cellWidths = new WeakMap();
+  rowSegs = new WeakMap();
+  /* A box selection is a set of columns off the old wrapping; keeping it would
+     leave carets sitting where nothing lines up any more. */
+  exitMulti();
+  paintSrc();
+  syncCarets();
+}
 
 function renderCommentMarkers() {
   settingsMarkers.innerHTML = commentMarkers.length
@@ -4595,6 +4712,7 @@ settingsMarkers.addEventListener('click', e => {
   settingsInput.focus();
 });
 settingsGroupColumn.addEventListener('input', () => applyGroupColumn(settingsGroupColumn.value));
+settingsWrap.addEventListener('click', () => applyWrapSource(!wrapSource));
 settingsForm.addEventListener('submit', e => {
   e.preventDefault();
   const m = settingsInput.value.trim();
@@ -4609,6 +4727,10 @@ document.addEventListener('pointerdown', e => {
 document.addEventListener('keydown', e => {
   if (e.key === 'Escape' && !settingsPop.hidden) { e.preventDefault(); closeSettings(true); }
 });
+
+/* Before the first paint: the source is laid out once, and it may as well be
+   laid out the way this session left it. */
+renderWrapSource();
 
 const saved = localStorage.getItem(KEY);
 src.value = saved === null ? '' : saved;

@@ -40,6 +40,14 @@
   --fs:12.5px;
   --lh:1.62;
   --pad:14px;
+
+  /* How far a wrapped row hangs in from the line it belongs to, so a
+     continuation reads as one at a glance instead of as a new line. Two indent
+     steps: enough to tell apart from the formatter's own 2-column nesting.
+     The editor panes cannot use it - see the wrap rail below - so this is the
+     optimiser's alone. */
+  --wrap-indent:4ch;
+  --wrap-rail:#4a4a4a;     /* marks the rows a line in the source pane spills onto */
 }
 
 *{box-sizing:border-box}
@@ -70,7 +78,7 @@ body{
   font:inherit;font-size:12px;cursor:pointer;
   transition:color .15s ease,border-color .15s ease;
 }
-.optimiser-button:hover{border-color:var(--fg-faint);color:var(--fg)}
+.optimiser-button:hover:not(:disabled){border-color:var(--fg-faint);color:var(--fg)}
 .optimiser-button:disabled{opacity:.5;cursor:default}
 .optimiser-button:focus-visible{outline:1px solid #8c8c8c;outline-offset:2px}
 .spacer{flex:1}
@@ -141,6 +149,23 @@ body{
 .settings-add input:focus{outline:none;border-color:#8c8c8c}
 .settings-subhead{margin-top:12px}
 
+/* an on/off switch sitting on the right of its own heading */
+.settings-switch{
+  appearance:none;flex:0 0 auto;width:26px;height:14px;padding:0;
+  border:1px solid var(--guide);border-radius:7px;background:var(--bg);
+  cursor:pointer;transition:background .15s ease,border-color .15s ease;
+}
+.settings-switch::before{
+  content:"";display:block;width:8px;height:8px;margin:2px;border-radius:50%;
+  background:var(--fg-faint);transition:transform .15s ease,background .15s ease;
+}
+.settings-switch[aria-checked="true"]{border-color:#4f7fa8;background:#264f78}
+.settings-switch[aria-checked="true"]::before{transform:translateX(12px);background:var(--fg)}
+.settings-switch:focus-visible{outline:1px solid #8c8c8c;outline-offset:2px}
+@media (prefers-reduced-motion:reduce){
+  .settings-switch,.settings-switch::before{transition:none}
+}
+
 /* ---- panes ---- */
 .panes{flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr}
 .pane{min-width:0;min-height:0;display:flex;flex-direction:column;background:var(--bg)}
@@ -157,8 +182,10 @@ body{
   tab-size:2;border:0;
   white-space:pre;overflow-wrap:normal;
 }
-/* the source pane soft-wraps; the formatted pane scrolls sideways */
-.mirror.wrap,#src{white-space:pre-wrap;overflow-wrap:break-word;word-break:normal}
+/* The source pane soft-wraps unless the gear turns it off; the formatted pane
+   always scrolls sideways. Mirror and textarea have to carry the class
+   together or they stop breaking lines in the same places. */
+.mirror.wrap,#src.wrap{white-space:pre-wrap;overflow-wrap:break-word;word-break:normal}
 
 /* The mirror sits ON TOP of the textarea. The textarea paints its selection
    rectangle in the layer below, so selected text still shows in full syntax
@@ -267,6 +294,24 @@ body{
 .gutter-in i{
   display:flex;align-items:flex-start;gap:5px;
   padding:0 8px 0 10px;font-style:normal;
+
+  /* One entry per logical line, as tall as however many rows that line wraps
+     over, so a rail down everything below the first row marks the rows it
+     spilled onto - an unnumbered row reads as a continuation rather than as a
+     line of its own. Entries a single row tall size this to nothing.
+
+     The obvious alternative, hanging the wrapped rows in, cannot work here:
+     a textarea lays its whole value out as one block and applies `text-indent`
+     to the first line only - `each-line` is ignored inside one - so the mirror
+     would take an indent the caret underneath never does. The gutter is the
+     one place a per-row mark costs the text no layout at all.
+
+     Entry heights come off rounded row offsets, so they can miss a row's worth
+     by a fraction either way; the 2px inset at each end is what keeps that
+     rounding from leaving a sliver of rail on a line that never wrapped. */
+  background:linear-gradient(var(--wrap-rail) 0 0) no-repeat;
+  background-size:1px calc(100% - var(--fs) * var(--lh) - 4px);
+  background-position:right 5px top calc(var(--fs) * var(--lh) + 2px);
 }
 .gutter-in b{
   flex:1;text-align:right;font-weight:normal;
@@ -354,7 +399,14 @@ body{
 .optimizer-code:focus-visible{box-shadow:inset 0 0 0 1px #707070}
 /* one row per line, numbered in a gutter the copy buttons never see */
 .optimizer-code{counter-reset:oln;--ogut:4.5ch}
-.oline{counter-increment:oln;position:relative;padding-left:var(--ogut)}
+/* Each line is its own block here, so the hanging indent needs no `each-line`
+   and works wherever the pane does. The number is positioned, not laid out, so
+   the indent leaves it alone. */
+.oline{
+  counter-increment:oln;position:relative;
+  padding-left:calc(var(--ogut) + var(--wrap-indent));
+  text-indent:calc(-1 * var(--wrap-indent));
+}
 .oline::before{content:counter(oln);position:absolute;left:0;width:calc(var(--ogut) - 1.5ch);text-align:right;color:var(--fg-faint);user-select:none;pointer-events:none}
 .optimizer-code::selection{background:var(--sel)}
 .optimizer-code .diff-removed,.optimizer-code .diff-added{font:inherit;font-weight:400;border-radius:2px}
@@ -362,6 +414,9 @@ body{
    copy it feeds - to the SQL that survives. */
 .optimizer-code .diff-removed{position:relative;background:#f14c4c35;color:#f3b1b1;text-decoration-line:line-through;text-decoration-style:solid;text-decoration-color:#f18484;text-decoration-thickness:.12em;text-decoration-skip-ink:none;box-decoration-break:clone;-webkit-box-decoration-break:clone;user-select:none;-webkit-user-select:none}
 .optimizer-code .diff-added{background:#73c99135;color:#bfe7c9}
+/* A changed run has one diff colour throughout; syntax token colours inside it
+   otherwise make the exact removed and added text harder to scan. */
+.optimizer-code .diff-removed > span,.optimizer-code .diff-added > span{color:inherit}
 body.optimizer-is-open{overflow:hidden}
 
 @media (max-width:700px){
