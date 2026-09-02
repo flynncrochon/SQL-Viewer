@@ -1383,7 +1383,7 @@
   /* Keep the transformation engine available to the regression tests without
      making the browser-only diff modal part of the public API. */
   if (typeof module !== 'undefined' && module.exports) {
-    module.exports = { lex, renderTokens, optimiseSql };
+    module.exports = { lex, renderTokens, optimiseSql, layoutOnOriginal };
   }
 
   /* The optimiser is also loaded directly by index.html. In a non-browser
@@ -1505,104 +1505,225 @@
     return `${token.type}:${canonicalToken(token)}`;
   }
 
-  /* Lexer offsets are UTF-16 offsets, while Array.from() gives us code-point
-     indexes for safe rendering. Convert the token ranges once so a non-ASCII
-     string literal cannot shift every mark after it by one position. */
-  function tokenCharRanges(text, tokens) {
-    const chars = Array.from(text);
-    const ranges = [];
-    let unitOffset = 0;
-    let charOffset = 0;
-
-    for (const token of tokens) {
-      while (charOffset < chars.length && unitOffset < token.start) {
-        unitOffset += chars[charOffset].length;
-        charOffset++;
-      }
-      const start = charOffset;
-      while (charOffset < chars.length && unitOffset < token.end) {
-        unitOffset += chars[charOffset].length;
-        charOffset++;
-      }
-      ranges.push({ start, end: charOffset });
-    }
-    return ranges;
-  }
-
-  function markTokenRange(marks, range) {
-    for (let index = range.start; index < range.end; index++) marks.add(index);
-  }
-
-  /* Join adjacent changed tokens with their plain horizontal whitespace. It
-     makes a removed predicate read as one Diffchecker-style change, but it
-     never paints a newline and it never treats whitespace alone as a change.
-     In particular, `IN (32,323)` and `IN (32, 323)` have identical tokens and
-     therefore produce no marks at all. */
-  function bridgeChangedWhitespace(chars, marks) {
-    const bridged = new Set(marks);
-    let index = 0;
-    while (index < chars.length) {
-      if (chars[index] !== ' ' && chars[index] !== '\t') { index++; continue; }
-      const start = index;
-      while (index < chars.length && (chars[index] === ' ' || chars[index] === '\t')) index++;
-      if (start > 0 && index < chars.length && marks.has(start - 1) && marks.has(index)) {
-        for (let space = start; space < index; space++) bridged.add(space);
-      }
-    }
-    return bridged;
-  }
-
-  function charDiff(oldText, newText) {
-    const oldChars = Array.from(oldText);
-    const newChars = Array.from(newText);
-
-    const oldTokens = lex(oldText);
-    const newTokens = lex(newText);
-    const oldRanges = tokenCharRanges(oldText, oldTokens);
-    const newRanges = tokenCharRanges(newText, newTokens);
-    const parts = diffSequence(oldTokens.map(tokenDiffKey), newTokens.map(tokenDiffKey));
-    const oldRemoved = new Set();
-    const newAdded = new Set();
-    let oldAt = 0, newAt = 0;
-
+  /* Lay the optimised tokens back over the original text. The original is
+     the skeleton: every run of tokens the optimiser left alone is copied out
+     verbatim, line breaks, indentation and comments included, and only the
+     runs it changed are rewritten, compactly, in place. A single-line input
+     stays on one line; a multi-line input keeps every line it can. Comments
+     inside a rewritten run are kept too, each on its own line. */
+  function layoutOnOriginal(oldText, oldTokens, newTokens) {
+    const aCode = significant(oldTokens);
+    const parts = diffSequence(aCode.map(tokenDiffKey), newTokens.map(tokenDiffKey));
+    const status = new Array(aCode.length);
+    const addsBefore = new Map();
+    let ai = 0, bi = 0;
     for (const part of parts) {
-      const itemCount = part.items.length;
-      if (part.type === 'equal') { oldAt += itemCount; newAt += itemCount; continue; }
-      if (part.type === 'remove') {
-        for (let i = 0; i < itemCount; i++) markTokenRange(oldRemoved, oldRanges[oldAt + i]);
-        oldAt += itemCount;
-      } else {
-        for (let i = 0; i < itemCount; i++) markTokenRange(newAdded, newRanges[newAt + i]);
-        newAt += itemCount;
+      for (let i = 0; i < part.items.length; i++) {
+        if (part.type === 'equal') { status[ai++] = 'keep'; bi++; }
+        else if (part.type === 'remove') status[ai++] = 'del';
+        else {
+          if (!addsBefore.has(ai)) addsBefore.set(ai, []);
+          addsBefore.get(ai).push(newTokens[bi++]);
+        }
       }
     }
 
-    const markText = (chars, marks, className) => {
-      const visualMarks = bridgeChangedWhitespace(chars, marks);
-      let html = '', marked = false;
-      chars.forEach((char, index) => {
-        const shouldMark = visualMarks.has(index);
-        if (shouldMark && !marked) { html += `<mark class="${className}">`; marked = true; }
-        if (!shouldMark && marked) { html += '</mark>'; marked = false; }
-        html += escapeHtml(char);
-        /* Keep long comma-separated lists readable without adding whitespace
-           to either copied SQL value. */
-        if (char === ',') html += '<wbr>';
-      });
-      if (marked) html += '</mark>';
-      return html || '<br>';
+    /* A removed run that could equally be its twin on the next line (the
+       diff is free to strike "AND a = 1" or "a = 1 AND") is slid onto line
+       boundaries, so whole lines go and the lines around them stay intact.
+       Only the part of the run that has a twin moves; a stray "(" struck
+       alongside it stays where it is. */
+    const wsAt = oldTokens.map((t, k) => oldText.slice(k ? oldTokens[k - 1].end : 0, t.start));
+    const codePos = [];
+    oldTokens.forEach((t, k) => { if (t.type !== 'comment') codePos.push(k); });
+    const keys = aCode.map(tokenDiffKey);
+    const n = aCode.length;
+    const lineStart = i => i <= 0 || i >= n || /\n/.test(wsAt[codePos[i]]);
+    const addsNear = (from, to) => {
+      for (let j = Math.max(0, from); j <= Math.min(n, to); j++) if (addsBefore.has(j)) return true;
+      return false;
+    };
+    for (let pass = 0, moved = true; moved && pass < 200; pass++) {
+      moved = false;
+      for (let i = 0; i < n;) {
+        if (status[i] !== 'del') { i++; continue; }
+        let e = i;
+        while (e < n && status[e] === 'del') e++;
+        if (!addsNear(i - 1, e + 1)) {
+          if (i > 0 && !lineStart(i) && lineStart(i - 1)) {
+            for (let w = e - i; w >= 1; w--) {
+              if (keys[i - 1] === keys[i + w - 1]) { status[i - 1] = 'del'; status[i + w - 1] = 'keep'; moved = true; break; }
+            }
+          } else if (e < n && !lineStart(e) && lineStart(e + 1)) {
+            for (let w = e - i; w >= 1; w--) {
+              if (keys[e] === keys[e - w]) { status[e] = 'del'; status[e - w] = 'keep'; moved = true; break; }
+            }
+          }
+        }
+        i = e;
+      }
+    }
+
+    const removedStarts = new Set();
+    const addedStarts = new Set();
+    let removedCount = 0, addedCount = 0;
+    let out = '';
+    let prevOut = null;          // last token written, for spacing
+    let prevKeptEnd = 0;         // offset in oldText just after the last kept token
+    let region = { changed: false, comments: [], adds: [], dels: 0 };
+    let codeIndex = 0;
+
+    const lineIndent = ws => ws.slice(ws.lastIndexOf('\n'));      // "\n" + indentation
+    const isLineComment = t => !t.value.startsWith('/*');
+
+    const emitRegion = (next, wsBefore) => {
+      const leadMatch = prevOut ? oldText.slice(prevKeptEnd).match(/^[ \t\r]*\n[ \t]*/) : null;
+      const lead = leadMatch ? lineIndent(leadMatch[0]) : '';
+      let needNl = false;
+      for (const { t, ws } of region.comments) {
+        const sep = !prevOut ? '' : /\n/.test(ws) ? lineIndent(ws) : needNl ? '\n' : ' ';
+        out += sep + t.value;
+        prevOut = t;
+        needNl = isLineComment(t);
+      }
+      let first = true;
+      for (const tok of region.adds) {
+        let sep = '';
+        if (!prevOut) sep = '';
+        else if (needNl) sep = '\n';
+        else if (first && lead && !region.dels) sep = lead;
+        else sep = needsSpace(prevOut, tok) ? ' ' : '';
+        addedStarts.add(out.length + sep.length);
+        addedCount += tok.value.length;
+        out += sep + tok.value;
+        prevOut = tok;
+        needNl = false;
+        first = false;
+      }
+      if (next) {
+        let sep = '';
+        if (!prevOut) sep = '';
+        else if (needNl) sep = /\n/.test(wsBefore) ? lineIndent(wsBefore) : '\n';
+        else if (/\n/.test(wsBefore)) sep = lineIndent(wsBefore);
+        else if (lead && !region.adds.length) sep = lead;
+        else sep = needsSpace(prevOut, next) ? ' ' : '';
+        out += sep;
+      }
+      region = { changed: false, comments: [], adds: [], dels: 0 };
     };
 
-    return {
-      oldHtml: markText(oldChars, oldRemoved, 'diff-removed'),
-      newHtml: markText(newChars, newAdded, 'diff-added'),
-      removedCount: [...oldRemoved].filter(index => !/\s/.test(oldChars[index])).length,
-      addedCount: [...newAdded].filter(index => !/\s/.test(newChars[index])).length,
-    };
+    for (let k = 0; k < oldTokens.length; k++) {
+      const t = oldTokens[k];
+      const wsBefore = oldText.slice(k ? oldTokens[k - 1].end : 0, t.start);
+      if (t.type === 'comment') { region.comments.push({ t, ws: wsBefore }); continue; }
+      const adds = addsBefore.get(codeIndex);
+      if (adds) { region.adds.push(...adds); region.changed = true; }
+      const st = status[codeIndex++];
+      if (st === 'del') {
+        region.changed = true;
+        region.dels++;
+        removedStarts.add(t.start);
+        removedCount += t.value.length;
+        continue;
+      }
+      if (!region.changed) {
+        out += oldText.slice(prevKeptEnd, t.start);        // untouched: verbatim
+        region.comments = [];
+      } else {
+        emitRegion(t, wsBefore);
+      }
+      out += t.value;
+      prevOut = t;
+      prevKeptEnd = t.end;
+    }
+    const tailAdds = addsBefore.get(aCode.length);
+    if (tailAdds) { region.adds.push(...tailAdds); region.changed = true; }
+    if (!region.changed) out += oldText.slice(prevKeptEnd);
+    else emitRegion(null, '');
+
+    return { text: out, removedStarts, addedStarts, removedCount, addedCount };
   }
 
-  function compactSql(sql) {
-    return renderTokens(lex(sql), { compact: true }).trim();
+  /* Syntax colouring with the same classes as the editor panes. The viewer
+     hands over its keyword, function and literal lists when it opens the
+     modal; without them every word is an identifier. Changed tokens are
+     wrapped in <mark>; the plain spaces between two changed tokens join the
+     same mark so a rewritten predicate reads as one change, but a line break
+     always ends it. */
+  let style = { keywords: new Set(), functions: new Set(), literals: new Set() };
+
+  function tokenClass(t, tokens, i, state) {
+    switch (t.type) {
+      case 'paren':
+        if (t.value === '(') return `p b${(state.depth++) % 3}`;
+        state.depth = Math.max(0, state.depth - 1);
+        return `p b${state.depth % 3}`;
+      case 'comment': return 't-com';
+      case 'str': return 't-str';
+      case 'qid': return t.value[0] === '[' ? 't-id' : 't-qid';
+      case 'num': return 't-num';
+      case 'comma': case 'semi': return 't-punct';
+      case 'op': return 't-op';
+      default: {
+        const u = t.value.toUpperCase();
+        if (style.literals.has(u)) return 't-lit';
+        let next = null;
+        for (let j = i + 1; j < tokens.length; j++) {
+          if (tokens[j].type !== 'comment') { next = tokens[j]; break; }
+        }
+        if (next && next.type === 'paren' && next.value === '(' && style.functions.has(u)) return 't-fn';
+        if (style.keywords.has(u)) return 't-kw';
+        return 't-id';
+      }
+    }
+  }
+
+  /* One <div class="oline"> per line so the panes can number them; a token
+     that spans lines (a block comment) is split across rows, and a mark is
+     closed at the row edge and reopened on the next one. */
+  function highlightHtml(text, tokens, marked, markClass) {
+    let html = '<div class="oline">', pos = 0, open = false, empty = true;
+    const state = { depth: 0 };
+    const close = () => { if (open) { html += '</mark>'; open = false; } };
+    const newline = () => { close(); html += (empty ? '<br>' : '') + '</div><div class="oline">'; empty = true; };
+    const emitPlain = str => {
+      str.split('\n').forEach((piece, i) => {
+        if (i) newline();
+        if (piece) { html += escapeHtml(piece); empty = false; }
+      });
+    };
+    tokens.forEach((t, i) => {
+      const ws = text.slice(pos, t.start);
+      const hit = marked.has(t.start);
+      if (ws) {
+        if (open && (!hit || /\n/.test(ws))) close();
+        emitPlain(ws);
+      }
+      const cls = tokenClass(t, tokens, i, state);
+      if (hit && !open) { html += `<mark class="${markClass}">`; open = true; }
+      else if (!hit) close();
+      t.value.split('\n').forEach((piece, j) => {
+        if (j) {
+          const was = open;
+          newline();
+          if (was) { html += `<mark class="${markClass}">`; open = true; }
+        }
+        if (piece) { html += `<span class="${cls}">${escapeHtml(piece)}</span>`; empty = false; }
+      });
+      /* Keep long comma-separated lists readable without adding whitespace
+         to either copied SQL value. */
+      if (t.type === 'comma') html += '<wbr>';
+      pos = t.end;
+    });
+    close();
+    emitPlain(text.slice(pos));
+    html += (empty ? '<br>' : '') + '</div>';
+    return html;
+  }
+
+  function fitGutter(pre, text) {
+    const digits = String(text.split('\n').length).length;
+    pre.style.setProperty('--ogut', `${digits + 2.5}ch`);
   }
 
   function updateGroupProdidButton() {
@@ -1611,13 +1732,17 @@
 
   function renderOptimizedSql() {
     const result = optimiseSql(currentOldText, { groupProdid: groupProdidEnabled });
-    const newText = result.error ? compactSql(currentOldText) : (renderTokens(lex(result.optimizedOneLine || result.optimized), { compact: true }).trim());
-    const diff = charDiff(currentOldText, newText);
-    currentNewText = newText;
-    oldCode.innerHTML = diff.oldHtml;
-    newCode.innerHTML = diff.newHtml;
-    addedCount.textContent = `+${diff.addedCount}`;
-    removedCount.textContent = `-${diff.removedCount}`;
+    const oldTokens = lex(currentOldText);
+    const laid = result.error
+      ? { text: currentOldText, removedStarts: new Set(), addedStarts: new Set(), removedCount: 0, addedCount: 0 }
+      : layoutOnOriginal(currentOldText, oldTokens, significant(lex(result.optimizedOneLine || result.optimized)));
+    currentNewText = laid.text;
+    oldCode.innerHTML = highlightHtml(currentOldText, oldTokens, laid.removedStarts, 'diff-removed');
+    newCode.innerHTML = highlightHtml(laid.text, lex(laid.text), laid.addedStarts, 'diff-added');
+    fitGutter(oldCode, currentOldText);
+    fitGutter(newCode, laid.text);
+    addedCount.textContent = `+${laid.addedCount}`;
+    removedCount.textContent = `-${laid.removedCount}`;
   }
 
   function show(sql) {
@@ -1660,6 +1785,7 @@
   window.addEventListener('sqlviewer-open-optimizer', event => {
     const detail = event.detail || {};
     if (Array.isArray(detail.commentMarkers)) lineCommentMarkers = detail.commentMarkers.slice();
+    if (detail.style) style = detail.style;
     show(detail.sql);
   });
   close.addEventListener('click', hide);

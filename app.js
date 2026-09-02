@@ -1279,6 +1279,17 @@ function showDiagnostic(index) {
    back into the textarea: the gutter follows the textarea, and if the two drift
    the numbers slide out of step with the rows they are numbering. */
 function syncScroll(ta, mirrorEl, gutInEl) {
+  /* The mirror hides its scrollbar, while the textarea does not. Once a soft-
+     wrapped document becomes tall enough to scroll, that otherwise gives the
+     mirror a wider line box and lets its tokens wrap on different rows from
+     the native caret. Measure instead of assuming a scrollbar width so this
+     also works with overlay scrollbars and browser/OS scaling. */
+  const scrollbarWidth = Math.max(0, ta.offsetWidth - ta.clientWidth);
+  const scrollbarValue = `${scrollbarWidth}px`;
+  if (mirrorEl.style.getPropertyValue('--textarea-scrollbar-width') !== scrollbarValue) {
+    mirrorEl.style.setProperty('--textarea-scrollbar-width', scrollbarValue);
+  }
+
   const requestedTop = ta === fmt && fmtScrollLimit !== null
     ? Math.min(ta.scrollTop, fmtScrollLimit)
     : ta.scrollTop;
@@ -3012,7 +3023,11 @@ function consumeHistoryInput(e) {
    the viewer itself is never changed by opening or viewing it. */
 function openOptimizer() {
   window.dispatchEvent(new CustomEvent('sqlviewer-open-optimizer', {
-    detail: { sql: src.value, commentMarkers: commentMarkers.slice() }
+    detail: {
+      sql: src.value,
+      commentMarkers: commentMarkers.slice(),
+      style: { keywords: KEYWORDS, functions: KNOWN_FUNCTIONS, literals: LITERALS },
+    }
   }));
 }
 
