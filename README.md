@@ -44,12 +44,15 @@
 - Configurable line-comment markers. The gear in the top right lists the
   characters that start a comment when they open a line (`'` and `#` by
   default); `--` and `/* */` are always recognised.
+- Configurable group-by column, also in the gear popover. It names the column
+  the optimiser's group toggle collects (`prodid` by default); bracketed and
+  quoted spellings are accepted and matching is case-insensitive.
 - Edits made in the formatted pane are merged back into the source without
   collapsing it: the source keeps its own line breaks and indentation, and
   only the tokens you changed are rewritten.
 - `WHERE` optimisation for duplicates, ranges, constants, and equality sets.
-- Optional `prodid` grouping for literal overrides into one `IN` and one
-  `NOT IN` predicate.
+- Optional grouping of the chosen column's literal overrides into one `IN`
+  and one `NOT IN` predicate.
 - Column matching is case-insensitive, including bracketed identifiers; text
   literals are folded case-insensitively when equality sets are merged.
 

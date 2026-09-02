@@ -115,6 +115,21 @@ function loadCommentMarkers() {
   return DEFAULT_COMMENT_MARKERS.slice();
 }
 
+/* The optimiser can collapse every literal filter on one column into a single
+   override. Which column that is belongs next to the comment markers in the
+   gear popover: it is a property of the SQL being read, not of one session. */
+const GROUP_COLUMN_KEY = 'sqlviewer.groupColumn';
+const DEFAULT_GROUP_COLUMN = 'prodid';
+let groupColumn = loadGroupColumn();
+
+function loadGroupColumn() {
+  try {
+    const raw = localStorage.getItem(GROUP_COLUMN_KEY);
+    if (typeof raw === 'string' && raw.trim()) return raw.trim();
+  } catch { /* storage unavailable or corrupt: use the default */ }
+  return DEFAULT_GROUP_COLUMN;
+}
+
 function atLineStart(text, i) {
   for (let j = i - 1; j >= 0; j--) {
     const c = text[j];
@@ -3068,6 +3083,7 @@ function openOptimizer() {
     detail: {
       sql: src.value,
       commentMarkers: commentMarkers.slice(),
+      groupColumn,
       style: { keywords: KEYWORDS, functions: KNOWN_FUNCTIONS, literals: LITERALS },
     }
   }));
@@ -3237,8 +3253,10 @@ function cellWidth(mirrorEl) {
 
 /* A zoom change or a late font swap changes the advance, so the cached cell
    is only trusted until either happens. */
-window.addEventListener('resize', () => { cellWidths = new WeakMap(); });
-if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { cellWidths = new WeakMap(); });
+window.addEventListener('resize', () => { cellWidths = new WeakMap(); rowSegs = new WeakMap(); });
+if (document.fonts && document.fonts.ready) {
+  document.fonts.ready.then(() => { cellWidths = new WeakMap(); rowSegs = new WeakMap(); });
+}
 
 /* Box edges land on whole device pixels. Rows measured a few hundredths of a
    pixel apart otherwise antialias to different columns, and the edge of the
@@ -3345,16 +3363,90 @@ function paintMulti() {
   }
 }
 
+/* ---- soft wrap ---- */
+
+/* One source line can take several rows on screen, and the box is dragged over
+   what is drawn. The column under the pointer therefore belongs to the visual
+   row it is on, and a caret at a column of a line's second visual row has to
+   land on the text drawn there rather than on the same column counted from the
+   start of the line - which is somewhere off on the first visual row.
+
+   `segmentsFor` cuts one line into its visual rows, each given as a pair of
+   columns into the line. Columns inside a segment count from the row's left
+   edge, which is where every visual row starts. */
+let rowSegs = new WeakMap();
+
+/* What every row of one pass shares. `maxCols` is what fits on a visual row:
+   a line shorter than that cannot have wrapped, and saying so from the text
+   alone keeps a drag down a long document off the layout entirely. */
+function wrapContext(pane) {
+  const cs = getComputedStyle(pane.mirror);
+  const lh = parseFloat(cs.lineHeight);
+  const cw = cellWidth(pane.mirror);
+  const wraps = cs.whiteSpace !== 'pre';
+  const inner = pane.mirror.clientWidth
+    - parseFloat(cs.paddingLeft) - parseFloat(cs.paddingRight);
+  const maxCols = wraps ? Math.max(1, Math.floor(inner / cw)) : Infinity;
+  return { lh, cw, wraps, maxCols };
+}
+
+function segmentsFor(ctx, rowEl, rowText) {
+  const len = rowText.length;
+  if (!ctx.wraps || !rowEl || len < ctx.maxCols) return [[0, len]];
+
+  const rowRect = rowEl.getBoundingClientRect();
+  const lines = Math.max(1, Math.round(rowRect.height / ctx.lh));
+  if (lines === 1) return [[0, len]];
+
+  /* Rows are rebuilt often enough that a stale set would be worse than no set
+     at all, so the cache only answers for the same text laid out the same way
+     it was measured. Anything else is measured again. */
+  const hit = rowSegs.get(rowEl);
+  if (hit && hit.lines === lines && hit.text === rowText) return hit.segs;
+
+  /* A character's own box says which visual row it is on, and those only ever
+     run forwards, so each break is found by bisection. The space that caused a
+     break hangs off the end of the row it closes and reports no box at all,
+     which is exactly the row it should count as being on. */
+  const startsRow = (col, line) => {
+    const r = rangeSpan(rowEl, col, col + 1).getBoundingClientRect();
+    return r.height ? Math.round((r.top - rowRect.top) / ctx.lh) >= line : false;
+  };
+
+  const segs = [];
+  let from = 0;
+  for (let line = 1; line < lines && from < len; line++) {
+    let lo = from + 1, hi = len;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if (startsRow(mid, line)) hi = mid; else lo = mid + 1;
+    }
+    segs.push([from, lo]);
+    from = lo;
+  }
+  segs.push([from, len]);
+  rowSegs.set(rowEl, { text: rowText, lines, segs });
+  return segs;
+}
+
+/* Which visual row a column of the line is on. A column that is both the end
+   of one segment and the start of the next belongs to the later one: that is
+   where the caret is drawn, at the left edge of the row it starts. */
+function segmentAt(segs, col) {
+  for (let i = 0; i < segs.length; i++) if (col < segs[i][1]) return i;
+  return segs.length - 1;
+}
+
 /* Only what is on screen is measured, for the same reason the match layer
    skips the rest: a box down a long document is one client rect per row.
 
-   Rows that do not wrap are not measured one by one. Column x is read once,
-   off the longest plain row the set touches, and every row of the box is
-   drawn between those same two values. Measuring each row separately left
-   edges a fraction of a pixel apart, and at some zoom levels that fraction
-   fell either side of a device pixel and bent the rectangle. Rows that wrap,
-   contain tabs, or hold non-ASCII glyphs keep the per-row measurement, since
-   their columns do not sit on one grid. */
+   Visual rows are not measured one by one. Column x is read once, off the
+   longest plain row the set touches, and every row of the box is drawn between
+   those same two values. Measuring each row separately left edges a fraction
+   of a pixel apart, and at some zoom levels that fraction fell either side of
+   a device pixel and bent the rectangle. Rows that contain tabs or non-ASCII
+   glyphs, and selections that run over more than one visual row, keep the
+   per-row measurement, since their columns do not sit on one grid. */
 const PLAIN_ROW = /^[\x20-\x7e]*$/;
 
 function multiHtml(pane) {
@@ -3363,8 +3455,8 @@ function multiHtml(pane) {
   const text = pane.ta.value;
   const starts = textLineStarts(text);
   const editorRect = pane.editor.getBoundingClientRect();
-  const lh = parseFloat(getComputedStyle(pane.mirror).lineHeight);
-  const cw = cellWidth(pane.mirror);
+  const ctx = wrapContext(pane);
+  const lh = ctx.lh, cw = ctx.cw;
 
   const info = new Map();
   const rowInfo = r => {
@@ -3376,85 +3468,100 @@ function multiHtml(pane) {
       it = {
         rowEl, rowRect, lineStart, len: lineEnd - lineStart,
         onScreen: rowRect.bottom > editorRect.top && rowRect.top < editorRect.bottom,
-        gridded: rowRect.height < lh * 1.5 && PLAIN_ROW.test(text.slice(lineStart, lineEnd)),
+        segs: segmentsFor(ctx, rowEl, text.slice(lineStart, lineEnd)),
       };
       info.set(r, it);
     }
     return it;
   };
 
+  /* A caret that stays inside one visual row of plain text is drawn on the
+     column grid. `base` is the offset that row starts at, so the same column
+     arithmetic works whether the row is a whole line or the tail of one. */
   let ruler = null;
   const spans = multi.carets.map(c => {
     const from = Math.min(c.a, c.h), to = Math.max(c.a, c.h);
     const first = displayRowAtStarts(starts, from);
     const last = Math.min(displayRowAtStarts(starts, to), rows.length - 1);
-    for (let r = first; r <= last; r++) {
-      const it = rowInfo(r);
-      if (it.onScreen && it.gridded && (!ruler || it.len > ruler.len)) ruler = it;
+    let seg = null;
+    if (first === last && first < rows.length) {
+      const it = rowInfo(first);
+      const i = segmentAt(it.segs, from - it.lineStart);
+      const [cs, ce] = it.segs[i];
+      const plain = PLAIN_ROW.test(text.slice(it.lineStart + cs, it.lineStart + ce));
+      if (to - it.lineStart <= ce && plain) {
+        seg = { i, base: it.lineStart + cs, len: ce - cs };
+        if (it.onScreen && (!ruler || seg.len > ruler.len)) {
+          ruler = { rowEl: it.rowEl, left: it.rowRect.left, base: cs, len: seg.len };
+        }
+      }
     }
-    return { c, from, to, first, last };
+    return { c, from, to, first, last, seg };
   });
-  const colX = columnRuler(ruler, editorRect, cw);
+  const colX = columnRuler(ruler, rows[0].getBoundingClientRect().left, editorRect, cw);
 
   let html = '';
-  for (const { c, from, to, first, last } of spans) {
+  for (const { c, from, to, first, last, seg } of spans) {
     const padL = c.padL || 0, padR = c.padR || 0;
-    const single = first === last && first < rows.length && rowInfo(first).gridded;
+    if (seg) {
+      const it = rowInfo(first);
+      if (!it.onScreen) continue;
+      const top = it.rowRect.top - editorRect.top + seg.i * lh;
+      if (from !== to || padR > padL) {
+        const x1 = colX(from - seg.base + padL), x2 = colX(to - seg.base + padR);
+        if (x2 > x1) {
+          html += `<i style="left:${x1}px;top:${top}px`
+            + `;width:${x2 - x1}px;height:${lh}px"></i>`;
+        }
+      }
+      const x = colX(c.h - seg.base + (c.pad || 0));
+      html += `<b style="left:${x}px;top:${top}px;height:${lh}px"></b>`;
+      continue;
+    }
     if (from !== to || padR > padL) {
       for (let r = first; r <= last && r < rows.length; r++) {
         const it = rowInfo(r);
         if (!it.onScreen) continue;
         const a = Math.max(from, it.lineStart) - it.lineStart;
         const b = Math.min(to, it.lineStart + it.len) - it.lineStart;
-        if (single) {
-          const x1 = colX(a + padL), x2 = colX(b + padR);
-          if (x2 > x1) {
-            html += `<i style="left:${x1}px;top:${it.rowRect.top - editorRect.top}px`
-              + `;width:${x2 - x1}px;height:${lh}px"></i>`;
-          }
-        } else {
-          // matchBoxesFor already merges by wrapped row and snaps to the row grid
-          if (b > a) html += matchBoxesFor(rangeSpan(it.rowEl, a, b), editorRect, it.rowRect.top, lh);
-          /* The stretch of the box past the end of a short line. There is no
-             text under it to measure, so it is laid out on the cell grid. */
-          if (padR > padL && r === last) {
-            html += virtualBox(it.rowEl, it.rowRect, it.len, padL, padR, editorRect, lh, cw);
-          }
+        // matchBoxesFor already merges by wrapped row and snaps to the row grid
+        if (b > a) html += matchBoxesFor(rangeSpan(it.rowEl, a, b), editorRect, it.rowRect.top, lh);
+        /* The stretch of the box past the end of a short line. There is no
+           text under it to measure, so it is laid out on the cell grid. */
+        if (padR > padL && r === last) {
+          html += virtualBox(it.rowEl, it.rowRect, it.len, padL, padR, editorRect, lh, cw);
         }
       }
     }
-    const headRow = displayRowAtStarts(starts, c.h);
-    if (single && headRow === first) {
-      const it = rowInfo(first);
-      if (it.onScreen) {
-        const x = colX(c.h - it.lineStart + (c.pad || 0));
-        html += `<b style="left:${x}px;top:${it.rowRect.top - editorRect.top}px;height:${lh}px"></b>`;
-      }
-    } else {
-      html += caretHtml(rows, starts, text, c.h, c.pad || 0, editorRect, lh, cw);
-    }
+    html += caretHtml(rows, starts, text, c.h, c.pad || 0, editorRect, lh, cw);
   }
   return html;
 }
 
 /* Column -> x, relative to the editor and snapped to the device grid. Read off
    the ruler row's own glyphs where it has them; columns past its end step on
-   in that row's measured advance, or the probe's cell when there is no row. */
-function columnRuler(ruler, editorRect, cw) {
+   in that row's measured advance, or the probe's cell when there is no row.
+   `base` is where the ruler row starts in its line, so a row that is the tail
+   of a soft-wrapped line rules the same columns as a whole line would. */
+function columnRuler(ruler, rowsLeft, editorRect, cw) {
   const cache = new Map();
-  const left = ruler ? ruler.rowRect.left : editorRect.left;
+  const left = ruler ? ruler.left : rowsLeft;
+  const base = ruler ? ruler.base : 0;
   const len = ruler ? ruler.len : 0;
   let end = left, adv = cw;
-  if (ruler && len > 0) {
-    const r = rangeSpan(ruler.rowEl, len - 1, len).getBoundingClientRect();
-    if (r.width) { end = r.right; adv = (end - left) / len; }
+  /* A row that wrapped at a space ends on one, and a space at a break is drawn
+     with no width at all, so the advance comes off the last glyph that has
+     one. */
+  for (let i = ruler ? len : 0; i > 0; i--) {
+    const r = rangeSpan(ruler.rowEl, base + i - 1, base + i).getBoundingClientRect();
+    if (r.width) { adv = (r.right - left) / i; end = left + len * adv; break; }
   }
   return col => {
     let x = cache.get(col);
     if (x !== undefined) return x;
     let abs;
     if (ruler && col < len) {
-      const r = rangeSpan(ruler.rowEl, col, col + 1).getBoundingClientRect();
+      const r = rangeSpan(ruler.rowEl, base + col, base + col + 1).getBoundingClientRect();
       abs = r.width ? r.left : left + col * adv;
     } else {
       abs = end + (col - len) * adv;
@@ -3502,13 +3609,14 @@ function caretHtml(rows, starts, text, at, pad, editorRect, lh, cw) {
 
 /* ---- the drag ---- */
 
-/* Which row and column the pointer is over, clamped rather than refused: a
-   drag that leaves the text still has a corner, and it is the nearest one. */
+/* Which visual row and column the pointer is over, clamped rather than
+   refused: a drag that leaves the text still has a corner, and it is the
+   nearest one. A soft-wrapped line is several rows here, one per `seg`. */
 function pointToRowCol(pane, clientX, clientY) {
   const text = pane.ta.value;
   const starts = textLineStarts(text);
   const rows = pane.mirror.children;
-  if (!rows.length) return { row: 0, col: 0 };
+  if (!rows.length) return { row: 0, seg: 0, col: 0 };
 
   let row;
   if (clientY < rows[0].getBoundingClientRect().top) row = 0;
@@ -3527,51 +3635,82 @@ function pointToRowCol(pane, clientX, clientY) {
   }
   row = Math.min(row, starts.length - 1);
 
-  const rowLeft = rows[Math.min(row, rows.length - 1)].getBoundingClientRect().left;
-  const col = Math.max(0, Math.round((clientX - rowLeft) / cellWidth(pane.mirror)));
-  return { row, col };
+  const ctx = wrapContext(pane);
+  const rowEl = rows[Math.min(row, rows.length - 1)];
+  const rowRect = rowEl.getBoundingClientRect();
+  const [lineStart, lineEnd] = lineBounds(text, starts, row);
+  const segs = segmentsFor(ctx, rowEl, text.slice(lineStart, lineEnd));
+  const seg = Math.max(0, Math.min(segs.length - 1,
+    Math.floor((clientY - rowRect.top) / ctx.lh)));
+  const col = Math.max(0, Math.round((clientX - rowRect.left) / ctx.cw));
+  return { row, seg, col };
 }
 
-/* One caret per line between the two corners. A line too short to reach the
-   box keeps its caret out at the column anyway, held there by `pad` - virtual
-   columns past the end of the line. That is what makes the set read as one
-   straight vertical line down ragged text instead of following each line's
+/* One caret per visual row between the two corners. A row too short to reach
+   the box keeps its caret out at the column anyway, held there by `pad` -
+   virtual columns past the end of the line. That is what makes the set read as
+   one straight vertical line down ragged text instead of following each line's
    end, and typing pads the short lines out so the text lands in the column
    too. `padL` and `padR` carry the same idea for the box's two edges, so the
-   rectangle keeps its shape over short and empty lines. */
-function boxCarets(ta, anchor, head) {
-  const text = ta.value;
+   rectangle keeps its shape over short and empty lines.
+
+   `headAt` is where in the set the corner being dragged ended up, which is
+   what keeps the view scrolled to the pointer rather than to the far end. */
+function boxCarets(pane, anchor, head) {
+  const text = pane.ta.value;
   const starts = textLineStarts(text);
-  const first = Math.min(anchor.row, head.row);
-  const last = Math.min(Math.max(anchor.row, head.row), starts.length - 1);
+  const rows = pane.mirror.children;
+  const ctx = wrapContext(pane);
+  const ahead = anchor.row < head.row || (anchor.row === head.row && anchor.seg <= head.seg);
+  const top = ahead ? anchor : head;
+  const bottom = ahead ? head : anchor;
+  const firstRow = Math.min(top.row, starts.length - 1);
+  const lastRow = Math.min(bottom.row, starts.length - 1);
   const left = Math.min(anchor.col, head.col);
   const right = Math.max(anchor.col, head.col);
   const out = [];
+  let headAt = 0;
 
-  for (let r = first; r <= last; r++) {
+  for (let r = firstRow; r <= lastRow; r++) {
     const [lineStart, lineEnd] = lineBounds(text, starts, r);
-    const len = lineEnd - lineStart;
-    const s = lineStart + Math.min(left, len);
-    const e = lineStart + Math.min(right, len);
-    const padL = Math.max(0, left - len);
-    const padR = Math.max(0, right - len);
-    /* The caret goes on the left edge whichever way the box was dragged. That
-       is the column you are about to type in, and it is the edge that has to
-       stay in view - anchoring on the far side would scroll a wide box off to
-       the right and put every caret where the text ends up rather than where
-       it starts. */
-    out.push({ a: e, h: s, pad: padL, padL, padR });
+    const segs = segmentsFor(ctx, rows[r], text.slice(lineStart, lineEnd));
+    const from = r === firstRow ? Math.min(top.seg, segs.length - 1) : 0;
+    const to = r === lastRow ? Math.min(bottom.seg, segs.length - 1) : segs.length - 1;
+    for (let i = from; i <= to; i++) {
+      const [cs, ce] = segs[i];
+      const len = ce - cs;
+      const base = lineStart + cs;
+      /* Only the row a line ends on can be padded. A caret held out past the
+         end of a wrapped row would type into the middle of the line, not past
+         its end, so those stop where their own row's text does. The space a
+         row wrapped at belongs to the row it closes but is drawn with no width
+         at all, so a caret stopping at the end of one goes before it - landing
+         on it would read as having jumped to the start of the next row. */
+      const tail = i === segs.length - 1;
+      let stop = len;
+      if (!tail) while (stop > 0 && text[base + stop - 1] === ' ') stop--;
+      const s = base + Math.min(left, stop);
+      const e = base + Math.min(right, stop);
+      const padL = tail ? Math.max(0, left - len) : 0;
+      const padR = tail ? Math.max(0, right - len) : 0;
+      if (r === head.row && i === Math.min(head.seg, segs.length - 1)) headAt = out.length;
+      /* The caret goes on the left edge whichever way the box was dragged. That
+         is the column you are about to type in, and it is the edge that has to
+         stay in view - anchoring on the far side would scroll a wide box off to
+         the right and put every caret where the text ends up rather than where
+         it starts. */
+      out.push({ a: e, h: s, pad: padL, padL, padR });
+    }
   }
-  return out;
+  return { carets: out, headAt };
 }
 
 function updateBoxDrag() {
   if (!boxDrag) return;
   const pane = boxDrag.pane;
   const head = pointToRowCol(pane, boxDrag.x, boxDrag.y);
-  const list = boxCarets(pane.ta, boxDrag.anchor, head);
-  const onHead = Math.max(0, Math.min(list.length - 1, head.row - Math.min(boxDrag.anchor.row, head.row)));
-  setCarets(pane.ta, boxDrag.base.concat(list), boxDrag.base.length + onHead);
+  const { carets, headAt } = boxCarets(pane, boxDrag.anchor, head);
+  setCarets(pane.ta, boxDrag.base.concat(carets), boxDrag.base.length + headAt);
 }
 
 /* Dragging to a row that is not on screen has to bring it on screen. The
@@ -4102,6 +4241,7 @@ for (const ta of [src, fmt]) {
 
 window.addEventListener('resize', () => {
   cellWidths = new WeakMap();
+  rowSegs = new WeakMap();
   paintSrc();
   if (fmtDirty) {
     if (folded.size || hasFoldLayout()) paintFmtRawFolded(); else paintFmtRaw();
@@ -4390,7 +4530,7 @@ window.addEventListener('pointerup', () => {
   fmtEditor.classList.remove('no-select');
 });
 
-/* ---- settings popover: which line-start markers begin a comment ---- */
+/* ---- settings popover: comment markers, and the optimiser's group column ---- */
 
 const settingsButton = document.getElementById('settings');
 const settingsPop = document.getElementById('settingsPop');
@@ -4398,6 +4538,7 @@ const settingsClose = document.getElementById('settingsClose');
 const settingsMarkers = document.getElementById('settingsMarkers');
 const settingsForm = document.getElementById('settingsAddForm');
 const settingsInput = document.getElementById('settingsMarkerInput');
+const settingsGroupColumn = document.getElementById('settingsGroupColumn');
 
 function renderCommentMarkers() {
   settingsMarkers.innerHTML = commentMarkers.length
@@ -4416,8 +4557,23 @@ function applyCommentMarkers(list) {
   fromSrc();
 }
 
+/* Only refilled when the popover opens: rewriting the box while it is being
+   typed in would put "prodid" back the moment the field is cleared. An empty
+   field means the default, and reopening shows which column that resolved to. */
+function renderGroupColumn() {
+  settingsGroupColumn.value = groupColumn;
+}
+
+function applyGroupColumn(value) {
+  const next = value.trim() || DEFAULT_GROUP_COLUMN;
+  if (next === groupColumn) return;
+  groupColumn = next;
+  try { localStorage.setItem(GROUP_COLUMN_KEY, next); } catch { /* storage may be unavailable */ }
+}
+
 function openSettings() {
   renderCommentMarkers();
+  renderGroupColumn();
   settingsPop.hidden = false;
   settingsButton.setAttribute('aria-expanded', 'true');
   settingsInput.focus();
@@ -4438,6 +4594,7 @@ settingsMarkers.addEventListener('click', e => {
   applyCommentMarkers(commentMarkers.filter((_, i) => i !== Number(btn.dataset.i)));
   settingsInput.focus();
 });
+settingsGroupColumn.addEventListener('input', () => applyGroupColumn(settingsGroupColumn.value));
 settingsForm.addEventListener('submit', e => {
   e.preventDefault();
   const m = settingsInput.value.trim();

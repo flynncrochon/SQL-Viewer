@@ -404,11 +404,21 @@
     inherited: { title: 'Removed conditions guaranteed by outer filters', detail: 'A nested condition was already decided by the AND constraints surrounding it.' },
     factored: { title: 'Factored shared conditions out of OR', detail: 'A condition repeated in every OR branch was written once in front of them.' },
     negated: { title: 'Pushed NOT into the comparison', detail: 'A negated comparison was rewritten with the opposite operator instead of being wrapped in NOT.' },
-    prodid: { title: 'Grouped prodid conditions', detail: 'Literal prodid filters were collected into one positive override and one global exclusion.' },
   };
 
-  function addRule(ctx, key) {
-    if (!ctx.rules.has(key)) ctx.rules.set(key, RULES[key]);
+  /* The grouped rule names the column the user chose, so it is built per run
+     rather than stored in the static table above. */
+  function groupedRule(column) {
+    const name = column ? column.toLowerCase() : DEFAULT_GROUP_COLUMN;
+    return {
+      title: `Grouped ${name} conditions`,
+      detail: `Literal ${name} filters were collected into one positive override and one global exclusion.`,
+    };
+  }
+
+  function addRule(ctx, key, column) {
+    if (ctx.rules.has(key)) return;
+    ctx.rules.set(key, key === 'grouped' ? groupedRule(column) : RULES[key]);
   }
 
   /* ------------------------------------------------------- constraints */
@@ -741,26 +751,43 @@
     return [makeSetAtom(fieldTokens, values, true)];
   }
 
-  /* ------------------------------------------------------ prodid grouping */
+  /* ------------------------------------------------ group-by-column pass */
 
   /* The regular constraint simplifier intentionally leaves NOT IN, <> and !=
-     alone. This optional pass extracts those explicit literal prodid filters
-     as manual OR overrides; arbitrary SQL is left untouched. */
+     alone. This optional pass extracts the explicit literal filters on one
+     chosen column as manual OR overrides; arbitrary SQL is left untouched.
+     The column is a viewer setting (the gear in the top bar), defaulting to
+     prodid. */
 
-  function isProdidField(field) {
+  const DEFAULT_GROUP_COLUMN = 'prodid';
+
+  /* A setting is plain text, so accept the spellings a user would type for a
+     column: bare, [bracketed], `backticked` or "quoted". */
+  function normaliseGroupColumn(name) {
+    const text = String(name == null ? '' : name).trim();
+    if (!text) return '';
+    const open = text[0];
+    const close = text[text.length - 1];
+    if (text.length > 1 && ((open === '[' && close === ']') || ((open === '`' || open === '"') && close === open))) {
+      return text.slice(1, -1).trim().toUpperCase();
+    }
+    return text.toUpperCase();
+  }
+
+  function isGroupField(field, column) {
     const last = field && field.tokens && field.tokens[field.tokens.length - 1];
-    return identifierName(last).toUpperCase() === 'PRODID';
+    return identifierName(last).toUpperCase() === column;
   }
 
   function hasNullValue(values) {
     return values.some(value => value.tokens.length === 1 && value.tokens[0].type === 'word' && value.tokens[0].value.toUpperCase() === 'NULL');
   }
 
-  function parseProdidConstraint(node) {
+  function parseGroupConstraint(node, column) {
     if (!node || node.kind !== 'atom') return null;
     const tokens = significant(node.tokens);
     const field = fieldAt(tokens);
-    if (!field || !isProdidField(field)) return null;
+    if (!field || !isGroupField(field, column)) return null;
 
     let index = field.next;
     const operator = tokens[index];
@@ -771,13 +798,13 @@
       const negative = word === 'NOT';
       const list = parseList(tokens, index + (negative ? 2 : 1));
       if (!list || list.next !== tokens.length || !list.values.length || hasNullValue(list.values)) return null;
-      return prodidCondition(negative ? 'negative' : 'positive', { field: field.key, fieldTokens: field.tokens }, list.values);
+      return groupCondition(negative ? 'negative' : 'positive', { field: field.key, fieldTokens: field.tokens }, list.values);
     }
 
     if (word !== '=' && word !== '<>' && word !== '!=') return null;
     const value = literalAt(tokens, index + 1);
     if (!value || value.next !== tokens.length || value.tokens[0].type === 'word' && value.tokens[0].value.toUpperCase() === 'NULL') return null;
-    return prodidCondition(word === '=' ? 'positive' : 'negative', { field: field.key, fieldTokens: field.tokens }, [{ tokens: value.tokens, key: tokenKey(value.tokens) }]);
+    return groupCondition(word === '=' ? 'positive' : 'negative', { field: field.key, fieldTokens: field.tokens }, [{ tokens: value.tokens, key: tokenKey(value.tokens) }]);
   }
 
   function valueListUnique(values) {
@@ -792,7 +819,7 @@
     return valueListUnique([...left, ...right]);
   }
 
-  function prodidCondition(kind, source, values = []) {
+  function groupCondition(kind, source, values = []) {
     const uniqueValues = valueListUnique(values);
     if (kind === 'positive' && !uniqueValues.length) return { kind: 'none', values: [] };
     if (kind === 'negative' && !uniqueValues.length) {
@@ -806,7 +833,7 @@
     };
   }
 
-  function makeProdidSetAtom(condition) {
+  function makeGroupSetAtom(condition) {
     if (condition.kind === 'positive' || condition.kind === 'negative') {
       const tokens = [...condition.fieldTokens, synthetic('word', condition.kind === 'negative' ? 'NOT' : 'IN')];
       if (condition.kind === 'negative') tokens.push(synthetic('word', 'IN'));
@@ -833,16 +860,16 @@
     return makeLogic(kind, flattened);
   }
 
-  /* Remove recognized prodid predicates from the clean expression. A branch
-     containing only prodid predicates has no clean counterpart, so it returns
-     null instead of becoming TRUE. Both positive manual overrides and
-     negative exclusions are collected from every boolean branch so grouped
-     mode emits one global IN and one global NOT IN. NOT expressions are left
-     intact because their prodid predicate is not an explicit form of this
-     toggle. */
-  function stripProdidConditions(node, collected) {
+  /* Remove the recognized predicates on the grouped column from the clean
+     expression. A branch containing only those predicates has no clean
+     counterpart, so it returns null instead of becoming TRUE. Both positive
+     manual overrides and negative exclusions are collected from every boolean
+     branch so grouped mode emits one global IN and one global NOT IN. NOT
+     expressions are left intact because their grouped predicate is not an
+     explicit form of this toggle. */
+  function stripGroupConditions(node, collected, column) {
     if (node.kind === 'atom') {
-      const condition = parseProdidConstraint(node);
+      const condition = parseGroupConstraint(node, column);
       if (condition) { collected.push(condition); return null; }
       return node;
     }
@@ -850,11 +877,11 @@
 
     const children = node.children.map(child => {
       const mark = collected.length;
-      const result = stripProdidConditions(child, collected);
+      const result = stripGroupConditions(child, collected, column);
       const tookPositive = result === null && collected.slice(mark).some(condition => condition.kind === 'positive');
       return { result, tookPositive };
     });
-    /* An AND that lost a positive prodid list is dropped whole. Its rows are a
+    /* An AND that lost a positive grouped list is dropped whole. Its rows are a
        subset of that list, so the hoisted OR override already covers them,
        while keeping the surviving siblings would widen the branch to every row
        they match on their own (Prodcode = 31 AND prodid IN (...) would become
@@ -867,9 +894,9 @@
     return remaining.length ? makeLogic(node.kind, remaining) : null;
   }
 
-  function groupProdid(node, ctx) {
+  function groupByColumn(node, ctx, column) {
     const collected = [];
-    const clean = stripProdidConditions(node, collected);
+    const clean = stripGroupConditions(node, collected, column);
     if (!collected.length) return node;
 
     const groups = new Map();
@@ -884,15 +911,15 @@
     const positiveConditions = [];
     const negativeConditions = [];
     groups.forEach(group => {
-      if (group.positive.length) positiveConditions.push(prodidCondition('positive', group, group.positive));
-      if (group.negative.length) negativeConditions.push(prodidCondition('negative', group, group.negative));
+      if (group.positive.length) positiveConditions.push(groupCondition('positive', group, group.positive));
+      if (group.negative.length) negativeConditions.push(groupCondition('negative', group, group.negative));
     });
 
     const positiveParts = clean ? [clean] : [];
-    positiveConditions.forEach(condition => positiveParts.push(makeProdidSetAtom(condition)));
+    positiveConditions.forEach(condition => positiveParts.push(makeGroupSetAtom(condition)));
     const positiveTree = positiveParts.length ? combineLogicNodes('or', positiveParts) : null;
-    const negativeNodes = negativeConditions.map(makeProdidSetAtom);
-    addRule(ctx, 'prodid');
+    const negativeNodes = negativeConditions.map(makeGroupSetAtom);
+    addRule(ctx, 'grouped', column);
     if (!negativeNodes.length) return positiveTree || constant(false);
     if (!positiveTree) return combineLogicNodes('and', negativeNodes);
     return combineLogicNodes('and', [positiveTree, ...negativeNodes]);
@@ -1362,7 +1389,10 @@
     }
 
     const ctx = { rules: new Map() };
-    const prepared = options.groupProdid ? groupProdid(tree, ctx) : tree;
+    /* groupColumn is the opt-in: a column name turns the pass on, anything
+       empty leaves the predicate's explicit NOT IN / <> filters alone. */
+    const column = normaliseGroupColumn(options.groupColumn);
+    const prepared = column ? groupByColumn(tree, ctx, column) : tree;
     /* Each pass can expose work for the others (a factored branch becomes a
        new AND, a merged set makes a sibling redundant), so run to a fixed
        point. nodeSignature is canonical, and the cap keeps it deterministic. */
@@ -1393,18 +1423,19 @@
   /* ----------------------------------------------------------- modal diff */
 
   const modal = document.getElementById('optimizerModal');
-  const oldCode = document.getElementById('optimizerOld');
-  const newCode = document.getElementById('optimizerNew');
+  const code = document.getElementById('optimizerCode');
   const close = document.getElementById('optimizerClose');
-  const copyOld = document.getElementById('optimizerCopyOld');
   const copyNew = document.getElementById('optimizerCopyNew');
-  const groupProdidButton = document.getElementById('optimizerGroupProdid');
+  const groupColumnButton = document.getElementById('optimizerGroupColumn');
+  const groupColumnLong = groupColumnButton.querySelector('.optimizer-toggle-long');
+  const groupColumnShort = groupColumnButton.querySelector('.optimizer-toggle-short');
   const addedCount = document.getElementById('optimizerAdded');
   const removedCount = document.getElementById('optimizerRemoved');
   let lastFocus = null;
   let currentOldText = '';
   let currentNewText = '';
-  let groupProdidEnabled = false;
+  let groupColumnEnabled = false;
+  let groupColumn = DEFAULT_GROUP_COLUMN;
 
   function escapeHtml(text) {
     return String(text).replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
@@ -1583,6 +1614,60 @@
       }
     }
 
+    /* ------------------------------------------------- unified (one pane)
+       The same diff read as a single document. The original text is copied
+       out verbatim - every line, indent, comment and blank line where the
+       author left it - the struck tokens stay in place, and the new tokens
+       are spliced in beside them. A deleted run is flushed before the new
+       text that stands in for it, so each change reads red-then-green.
+       Offsets are into the merged text, which re-lexes to the same tokens
+       because every splice keeps the spacing the renderer would use. */
+    const unified = { text: '', removedStarts: new Set(), addedStarts: new Set() };
+    {
+      let prev = null;              // last token written, for spacing
+      let pending = [];             // adds waiting for the deleted run to end
+      let codeAt = 0;
+      let cursor = 0;               // offset in oldText just after the last token
+      const endsLine = t => t && t.type === 'comment' && !t.value.startsWith('/*');
+      const writeAdds = list => {
+        /* Anything appended to a line comment is swallowed by it. */
+        if (endsLine(prev) && !/\n[ \t]*$/.test(unified.text)) unified.text += '\n';
+        for (const tok of list) {
+          /* The author's own break or indent was written first, so only
+             add a separator when the splice would run two tokens together. */
+          if (needsSpace(prev, tok) && !/\s$/.test(unified.text)) unified.text += ' ';
+          unified.addedStarts.add(unified.text.length);
+          unified.text += tok.value;
+          prev = tok;
+        }
+      };
+      for (let k = 0; k < oldTokens.length; k++) {
+        const t = oldTokens[k];
+        const ws = oldText.slice(cursor, t.start);
+        if (t.type === 'comment') {
+          unified.text += ws;
+        } else {
+          const adds = addsBefore.get(codeAt);
+          if (adds) pending.push(...adds);
+          const deleted = status[codeAt++] === 'del';
+          unified.text += ws;
+          if (!deleted && pending.length) {
+            writeAdds(pending);
+            pending = [];
+            if (needsSpace(prev, t)) unified.text += ' ';
+          }
+          if (deleted) unified.removedStarts.add(unified.text.length);
+        }
+        unified.text += t.value;
+        prev = t;
+        cursor = t.end;
+      }
+      const trailing = addsBefore.get(aCode.length);
+      if (trailing) pending.push(...trailing);
+      if (pending.length) writeAdds(pending);
+      unified.text += oldText.slice(cursor);
+    }
+
     const removedStarts = new Set();
     let addedStarts = new Set();
     let removedCount = 0, addedCount = 0;
@@ -1708,15 +1793,16 @@
     if (!region.changed) write(oldText.slice(prevKeptEnd));
     else emitRegion(null, '');
 
-    return { text: out, removedStarts, addedStarts, removedCount, addedCount };
+    return { text: out, removedStarts, addedStarts, removedCount, addedCount, unified };
   }
 
   /* Syntax colouring with the same classes as the editor panes. The viewer
      hands over its keyword, function and literal lists when it opens the
-     modal; without them every word is an identifier. Changed tokens are
-     wrapped in <mark>; the plain spaces between two changed tokens join the
-     same mark so a rewritten predicate reads as one change, but a line break
-     always ends it. */
+     modal; without them every word is an identifier. markOf returns the mark
+     class for a token start, or '' - the plain spaces between two tokens
+     marked the same way join one <mark>, so a rewritten predicate reads as a
+     single change, but a line break or a switch from struck to new always
+     ends it. */
   let style = { keywords: new Set(), functions: new Set(), literals: new Set() };
 
   function tokenClass(t, tokens, i, state) {
@@ -1748,10 +1834,10 @@
   /* One <div class="oline"> per line so the panes can number them; a token
      that spans lines (a block comment) is split across rows, and a mark is
      closed at the row edge and reopened on the next one. */
-  function highlightHtml(text, tokens, marked, markClass) {
-    let html = '<div class="oline">', pos = 0, open = false, empty = true;
+  function highlightHtml(text, tokens, markOf) {
+    let html = '<div class="oline">', pos = 0, openClass = null, empty = true;
     const state = { depth: 0 };
-    const close = () => { if (open) { html += '</mark>'; open = false; } };
+    const close = () => { if (openClass) { html += '</mark>'; openClass = null; } };
     const newline = () => { close(); html += (empty ? '<br>' : '') + '</div><div class="oline">'; empty = true; };
     const emitPlain = str => {
       str.split('\n').forEach((piece, i) => {
@@ -1761,19 +1847,19 @@
     };
     tokens.forEach((t, i) => {
       const ws = text.slice(pos, t.start);
-      const hit = marked.has(t.start);
+      const hit = markOf(t.start);
       if (ws) {
-        if (open && (!hit || /\n/.test(ws))) close();
+        if (openClass && (hit !== openClass || /\n/.test(ws))) close();
         emitPlain(ws);
       }
       const cls = tokenClass(t, tokens, i, state);
-      if (hit && !open) { html += `<mark class="${markClass}">`; open = true; }
+      if (hit && hit !== openClass) { close(); html += `<mark class="${hit}">`; openClass = hit; }
       else if (!hit) close();
       t.value.split('\n').forEach((piece, j) => {
         if (j) {
-          const was = open;
+          const was = openClass;
           newline();
-          if (was) { html += `<mark class="${markClass}">`; open = true; }
+          if (was) { html += `<mark class="${was}">`; openClass = was; }
         }
         if (piece) { html += `<span class="${cls}">${escapeHtml(piece)}</span>`; empty = false; }
       });
@@ -1793,35 +1879,45 @@
     pre.style.setProperty('--ogut', `${digits + 2.5}ch`);
   }
 
-  function updateGroupProdidButton() {
-    groupProdidButton.setAttribute('aria-pressed', String(groupProdidEnabled));
+  function updateGroupColumnButton() {
+    groupColumnButton.setAttribute('aria-pressed', String(groupColumnEnabled));
+    groupColumnLong.textContent = `group ${groupColumn}`;
+    groupColumnShort.textContent = groupColumn;
+    const label = `Group ${groupColumn} conditions`;
+    groupColumnButton.title = label;
+    groupColumnButton.setAttribute('aria-label', label);
   }
 
+  const noChange = text => ({
+    text, removedCount: 0, addedCount: 0,
+    unified: { text, removedStarts: new Set(), addedStarts: new Set() },
+  });
+
   function renderOptimizedSql() {
-    const result = optimiseSql(currentOldText, { groupProdid: groupProdidEnabled });
-    const oldTokens = lex(currentOldText);
+    const result = optimiseSql(currentOldText, { groupColumn: groupColumnEnabled ? groupColumn : '' });
     const laid = result.error
-      ? { text: currentOldText, removedStarts: new Set(), addedStarts: new Set(), removedCount: 0, addedCount: 0 }
-      : layoutOnOriginal(currentOldText, oldTokens, significant(lex(result.optimizedOneLine || result.optimized)));
+      ? noChange(currentOldText)
+      : layoutOnOriginal(currentOldText, lex(currentOldText), significant(lex(result.optimizedOneLine || result.optimized)));
+    /* What the pane shows is the merge; what it copies is only the new side. */
     currentNewText = laid.text;
-    oldCode.innerHTML = highlightHtml(currentOldText, oldTokens, laid.removedStarts, 'diff-removed');
-    newCode.innerHTML = highlightHtml(laid.text, lex(laid.text), laid.addedStarts, 'diff-added');
-    fitGutter(oldCode, currentOldText);
-    fitGutter(newCode, laid.text);
+    const merged = laid.unified;
+    code.innerHTML = highlightHtml(merged.text, lex(merged.text), at =>
+      (merged.removedStarts.has(at) ? 'diff-removed' : merged.addedStarts.has(at) ? 'diff-added' : ''));
+    fitGutter(code, merged.text);
     addedCount.textContent = `+${laid.addedCount}`;
     removedCount.textContent = `-${laid.removedCount}`;
   }
 
   function show(sql) {
     currentOldText = String(sql || '').trim();
-    groupProdidEnabled = false;
-    updateGroupProdidButton();
+    groupColumnEnabled = false;
+    updateGroupColumnButton();
     renderOptimizedSql();
     modal.hidden = false;
     modal.setAttribute('aria-hidden', 'false');
     document.body.classList.add('optimizer-is-open');
     lastFocus = document.activeElement;
-    newCode.focus();
+    code.focus();
   }
 
   function hide() {
@@ -1831,17 +1927,41 @@
     if (lastFocus && typeof lastFocus.focus === 'function') lastFocus.focus();
   }
 
+  function selectAll() {
+    const selection = window.getSelection();
+    if (!selection) return;
+    const range = document.createRange();
+    range.selectNodeContents(code);
+    selection.removeAllRanges();
+    selection.addRange(range);
+  }
+
+  /* Struck tokens are user-select:none, so a drag already skips them and the
+     browser's own copy of a partial selection is right. A selection covering
+     the whole pane is a different intent - "give me the result" - and the
+     marks alone cannot express it, because the whitespace between a kept and
+     a struck token is selectable and the layout differs anyway. So a
+     select-all copy hands over exactly what the copy button does. */
+  function wholePaneSelected() {
+    const selection = window.getSelection();
+    if (!selection || selection.rangeCount !== 1 || selection.isCollapsed) return false;
+    const range = selection.getRangeAt(0);
+    if (!code.contains(range.commonAncestorContainer)) return false;
+    const all = document.createRange();
+    all.selectNodeContents(code);
+    return range.compareBoundaryPoints(Range.START_TO_START, all) <= 0
+      && range.compareBoundaryPoints(Range.END_TO_END, all) >= 0;
+  }
+
   async function copySql(text, button) {
     try {
       await navigator.clipboard.writeText(text);
     } catch (_) {
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(button === copyOld ? oldCode : newCode);
-      selection.removeAllRanges();
-      selection.addRange(range);
+      /* No clipboard permission: select the pane and let the copy handler
+         below substitute the optimised SQL for what is on screen. */
+      selectAll();
       document.execCommand('copy');
-      selection.removeAllRanges();
+      window.getSelection().removeAllRanges();
     }
     const label = button.textContent;
     button.textContent = 'copied';
@@ -1853,19 +1973,32 @@
     const detail = event.detail || {};
     if (Array.isArray(detail.commentMarkers)) lineCommentMarkers = detail.commentMarkers.slice();
     if (detail.style) style = detail.style;
+    groupColumn = String(detail.groupColumn || '').trim() || DEFAULT_GROUP_COLUMN;
     show(detail.sql);
   });
   close.addEventListener('click', hide);
   close.addEventListener('keydown', event => {
     if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); hide(); }
   });
-  copyOld.addEventListener('click', () => copySql(currentOldText, copyOld));
   copyNew.addEventListener('click', () => copySql(currentNewText, copyNew));
-  groupProdidButton.addEventListener('click', () => {
-    groupProdidEnabled = !groupProdidEnabled;
-    updateGroupProdidButton();
+  groupColumnButton.addEventListener('click', () => {
+    groupColumnEnabled = !groupColumnEnabled;
+    updateGroupColumnButton();
     renderOptimizedSql();
   });
   modal.addEventListener('click', event => { if (event.target === modal) hide(); });
-  document.addEventListener('keydown', event => { if (event.key === 'Escape' && !modal.hidden) hide(); });
+  document.addEventListener('keydown', event => {
+    if (modal.hidden) return;
+    if (event.key === 'Escape') { hide(); return; }
+    /* Ctrl+A would otherwise select the page behind the overlay. */
+    if ((event.ctrlKey || event.metaKey) && !event.altKey && (event.key === 'a' || event.key === 'A')) {
+      event.preventDefault();
+      selectAll();
+    }
+  });
+  document.addEventListener('copy', event => {
+    if (modal.hidden || !wholePaneSelected() || !event.clipboardData) return;
+    event.preventDefault();
+    event.clipboardData.setData('text/plain', currentNewText);
+  });
 })();

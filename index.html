@@ -6,7 +6,7 @@
 <title>SQL Viewer</title>
 <link rel="icon" type="image/svg+xml" href="icons/sql-viewer-brackets-vscode-balanced.svg">
 <meta name="description" content="Paste SQL, see it broken down by bracket depth, and review safe logical optimisations.">
-<link rel="stylesheet" href="styles.css?v=unbounded-validation-1">
+<link rel="stylesheet" href="styles.css?v=unified-diff-1">
 </head>
 <body>
   <header class="bar">
@@ -34,8 +34,15 @@
 
   <div class="settings-pop" id="settingsPop" role="dialog" aria-label="Settings" hidden>
     <div class="settings-head">
-      <span>Comment markers</span>
+      <span>Optimiser group by column</span>
       <button class="settings-close" id="settingsClose" type="button" aria-label="Close settings">×</button>
+    </div>
+    <div class="settings-add">
+      <input id="settingsGroupColumn" type="text" placeholder="prodid" maxlength="64" spellcheck="false" autocomplete="off" aria-label="Optimiser group by column">
+    </div>
+
+    <div class="settings-head settings-subhead">
+      <span>Comment markers</span>
     </div>
     <ul class="settings-markers" id="settingsMarkers"></ul>
     <form class="settings-add" id="settingsAddForm">
@@ -77,28 +84,23 @@
   <div class="optimizer-modal" id="optimizerModal" hidden aria-hidden="true">
     <div class="optimizer-dialog" role="dialog" aria-modal="true" aria-label="SQL Optimiser">
       <div class="optimizer-titlebar">
-        <div class="optimizer-header-side old-title">
-          <span class="optimizer-title">Old</span>
-          <button class="optimizer-copy" id="optimizerCopyOld" type="button" title="Copy old SQL">copy</button>
-        </div>
-        <div class="optimizer-header-side new-title">
-          <span class="optimizer-title">New</span>
+        <div class="optimizer-header-side">
+          <span class="optimizer-title">Optimised</span>
           <button class="optimizer-copy" id="optimizerCopyNew" type="button" title="Copy optimised SQL">copy</button>
-          <button class="optimizer-toggle" id="optimizerGroupProdid" type="button" title="Group prodid conditions" aria-label="Group prodid conditions" aria-pressed="false"><span class="optimizer-toggle-long">group prodid</span><span class="optimizer-toggle-short" aria-hidden="true">prodid</span></button>
+          <button class="optimizer-toggle" id="optimizerGroupColumn" type="button" title="Group prodid conditions" aria-label="Group prodid conditions" aria-pressed="false"><span class="optimizer-toggle-long">group prodid</span><span class="optimizer-toggle-short" aria-hidden="true">prodid</span></button>
           <span class="optimizer-change-count" id="optimizerChangeCount" aria-label="Character changes">
             <span class="optimizer-added" id="optimizerAdded">+0</span><span class="optimizer-count-separator">, </span><span class="optimizer-removed" id="optimizerRemoved">-0</span>
           </span>
         </div>
         <span class="optimizer-close" id="optimizerClose" role="button" tabindex="0" aria-label="Close optimiser">×</span>
       </div>
-      <div class="optimizer-diff-grid">
-        <pre class="optimizer-code old-code" id="optimizerOld" tabindex="0" aria-label="Old SQL"></pre>
-        <pre class="optimizer-code new-code" id="optimizerNew" tabindex="0" aria-label="Optimised SQL"></pre>
+      <div class="optimizer-diff-pane">
+        <pre class="optimizer-code" id="optimizerCode" tabindex="0" aria-label="Optimised SQL, with the removed text struck through"></pre>
       </div>
     </div>
   </div>
 
-<script src="app.js?v=unbounded-validation-1" defer></script>
-<script src="optimizer.js?v=layout-4" defer></script>
+<script src="app.js?v=unified-diff-1" defer></script>
+<script src="optimizer.js?v=unified-1" defer></script>
 </body>
 </html>

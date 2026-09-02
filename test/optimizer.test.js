@@ -568,7 +568,7 @@ test('keeps UNKNOWN distinct from FALSE underneath NOT', () => {
 });
 test('drops an AND branch whose prodid list was hoisted instead of widening it', () => {
   const sql = "(Prodcode = 31 AND prodid IN (1, 2)) OR prodid IN (3) OR (Prodcode = 56 AND Brand = 'x')";
-  const result = optimiseSql(sql, { groupProdid: true });
+  const result = optimiseSql(sql, { groupColumn: 'prodid' });
   assert.equal(result.error, undefined);
 
   const keys = tokenKeys(result.optimizedOneLine);
@@ -583,17 +583,17 @@ test('drops an AND branch whose prodid list was hoisted instead of widening it',
 });
 
 test('keeps the siblings of a hoisted NOT IN and of a stripped OR arm', () => {
-  const negated = optimiseSql("Prodcode = 31 AND prodid NOT IN (1, 2)", { groupProdid: true });
+  const negated = optimiseSql("Prodcode = 31 AND prodid NOT IN (1, 2)", { groupColumn: 'prodid' });
   assert.equal(negated.error, undefined);
   assert.ok(tokenKeys(negated.optimizedOneLine).includes('num:31'), negated.optimizedOneLine);
 
-  const arm = optimiseSql("Prodcode = 31 AND (Brand = 'x' OR prodid IN (1))", { groupProdid: true });
+  const arm = optimiseSql("Prodcode = 31 AND (Brand = 'x' OR prodid IN (1))", { groupColumn: 'prodid' });
   assert.equal(arm.error, undefined);
   assert.ok(tokenKeys(arm.optimizedOneLine).includes('num:31'), arm.optimizedOneLine);
 });
 
 test('groups all prodid exclusions into one global NOT IN', () => {
-  const result = optimiseSql('a = 0 OR prodid != 1 OR [PRODID] NOT IN (2, 3)', { groupProdid: true });
+  const result = optimiseSql('a = 0 OR prodid != 1 OR [PRODID] NOT IN (2, 3)', { groupColumn: 'prodid' });
   assert.equal(result.error, undefined);
   assert.equal(result.optimizedOneLine, 'a = 0 AND prodid NOT IN (1, 2, 3)');
 });
@@ -606,11 +606,35 @@ test('emits one positive and one negative prodid group across branches', () => {
       AND PRODID NOT IN (5, 6))
     OR [prodid] IN (7, 8)
   `;
-  const result = optimiseSql(sql, { groupProdid: true });
+  const result = optimiseSql(sql, { groupColumn: 'prodid' });
   assert.equal(result.error, undefined);
   assert.match(result.optimizedOneLine, /Prodid IN \(1, 2, 7, 8\)/i);
   assert.match(result.optimizedOneLine, /Prodid NOT IN \(3, 4, 5, 6\)/i);
   assert.equal((result.optimizedOneLine.match(/(?:\bprodid\b|\[prodid\])/gi) || []).length, 2);
+});
+
+test('groups whichever column the viewer setting names', () => {
+  const sql = "Store = 4 AND SiteId IN (1, 2) OR SiteId = 3 OR prodid IN (9)";
+  const result = optimiseSql(sql, { groupColumn: 'siteid' });
+  assert.equal(result.error, undefined);
+  /* prodid is just another column once SiteId is the grouped one. */
+  assert.match(result.optimizedOneLine, /SiteId IN \(1, 2, 3\)/i);
+  assert.match(result.optimizedOneLine, /prodid IN \(9\)/i);
+  assert.ok(result.rules.some(rule => rule.title === 'Grouped siteid conditions'), result.optimizedOneLine);
+});
+
+test('accepts a quoted column name in the setting', () => {
+  const bracketed = optimiseSql('a = 0 OR [Site Id] != 1', { groupColumn: '[Site Id]' });
+  assert.equal(bracketed.optimizedOneLine, 'a = 0 AND [Site Id] NOT IN (1)');
+  const bare = optimiseSql('a = 0 OR [Site Id] != 1', { groupColumn: 'site id' });
+  assert.equal(bare.optimizedOneLine, bracketed.optimizedOneLine);
+});
+
+test('leaves the predicate alone when no column is configured', () => {
+  const sql = "a = 0 OR prodid != 1";
+  assert.equal(optimiseSql(sql, { groupColumn: '' }).optimizedOneLine, sql);
+  assert.equal(optimiseSql(sql, { groupColumn: '   ' }).optimizedOneLine, sql);
+  assert.equal(optimiseSql(sql).optimizedOneLine, sql);
 });
 
 /* ------------------------------------------------------- layout on original */
@@ -677,4 +701,65 @@ test('leaves a comment where it was when the rewrite starts on a fresh line', ()
 -- redundant
 -- kept
 [b] IN (9)`);
+});
+
+/* ------------------------------------------------------------ unified pane */
+
+/* The modal shows one merged document rather than two panes, so the merge has
+   to carry both sides losslessly: strike the red and the optimised SQL is what
+   is left, and every mark has to land on a token the browser will re-lex at
+   the same offset - the marks are looked up by token start. */
+function unified(sql, options = {}) {
+  const trimmed = sql.trim();
+  const result = optimiseSql(trimmed, options);
+  assert.equal(result.error, undefined);
+  const laid = layoutOnOriginal(trimmed, lex(trimmed), codeTokens(result.optimizedOneLine));
+  return { ...laid.unified, optimized: result.optimizedOneLine, laid };
+}
+
+test('merges both sides of the diff into one document', () => {
+  const merged = unified(`[a] IN (1) OR
+-- fruit
+[a] IN (2) OR
+[a] IN (3) OR
+-- veg
+[b] IN (9)`);
+
+  /* Every line, comment and indent of the original is still there; only the
+     new "," tokens have been spliced in beside the struck text. */
+  assert.equal(merged.text, `[a] IN (1) OR
+-- fruit
+[a] IN (, 2) OR
+[a] IN (, 3) OR
+-- veg
+[b] IN (9)`);
+  assert.equal(merged.removedStarts.size > 0, true);
+  assert.equal(merged.addedStarts.size, 2);
+});
+
+test('leaves exactly the optimised SQL once the struck tokens are dropped', () => {
+  const cases = [
+    [`[a] IN (1) OR [a] IN (2)`, {}],
+    [`SELECT * FROM t WHERE (a = 1 AND b = 2) OR (a = 1 AND b = 3)`, {}],
+    [`a = 1 AND a = 1 AND (b IN (4, 4, 5) OR c <> 9) AND NOT (d IS NULL)`, {}],
+    [`-- lead
+x IN (1) OR x IN (2)
+-- trail`, {}],
+    [`Prodcode = 28 AND Prodid IN (1, 2) AND Prodid NOT IN (3, 4)
+OR Prodcode = 56 AND PRODID NOT IN (5, 6)
+OR [prodid] IN (7, 8)`, { groupColumn: 'prodid' }],
+  ];
+
+  for (const [sql, options] of cases) {
+    const merged = unified(sql, options);
+    const tokens = codeTokens(merged.text);
+    const starts = new Set(lex(merged.text).map(token => token.start));
+    for (const set of [merged.removedStarts, merged.addedStarts]) {
+      for (const at of set) assert.equal(starts.has(at), true, `mark at ${at} is not a token start in ${merged.text}`);
+    }
+    assert.equal([...merged.removedStarts].some(at => merged.addedStarts.has(at)), false);
+
+    const kept = tokens.filter(token => !merged.removedStarts.has(token.start)).map(tokenKey);
+    assert.deepEqual(kept, tokenKeys(merged.optimized), `after striking, ${merged.text}`);
+  }
 });

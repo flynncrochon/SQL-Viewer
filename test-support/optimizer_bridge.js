@@ -10,7 +10,7 @@ const { optimiseSql } = require('../optimizer.js');
 const input = fs.readFileSync(0, 'utf8');
 const jobs = JSON.parse(input);
 const results = jobs.map(job => {
-  const result = optimiseSql(job.sql, { groupProdid: Boolean(job.groupProdid) });
+  const result = optimiseSql(job.sql, { groupColumn: job.groupColumn || '' });
   return {
     optimized: result.optimized,
     optimizedOneLine: result.optimizedOneLine || null,

@@ -48,7 +48,7 @@ PRODID_PREDICATE = re.compile(
 @dataclass(frozen=True)
 class Expression:
     text: str
-    # Literal prodid values that groupProdid is allowed to affect. A NOT
+    # Literal prodid values that grouped mode is allowed to affect. A NOT
     # wrapper clears this set because the production pass deliberately leaves
     # negated subtrees intact.
     affected_prodid: frozenset[int] = frozenset()
@@ -293,7 +293,7 @@ def build_cases() -> list[Case]:
 
 
 def optimiser_results(cases: list[Case], group_prodid: bool) -> list[dict]:
-    jobs = [{"sql": case.sql, "groupProdid": group_prodid} for case in cases]
+    jobs = [{"sql": case.sql, "groupColumn": "prodid" if group_prodid else ""} for case in cases]
     try:
         completed = subprocess.run(
             [NODE, str(BRIDGE)],
@@ -396,7 +396,7 @@ def check_mode(
             positive_spots, negative_spots = grouped_prodid_spots(optimized)
             if positive_spots > 1 or negative_spots > 1:
                 raise AssertionError(
-                    "groupProdid emitted more than one grouped prodid predicate:\n"
+                    "grouped mode emitted more than one grouped prodid predicate:\n"
                     f"input:\n{case.sql}\noutput:\n{optimized}\n"
                     f"positive spots: {positive_spots}; negative spots: {negative_spots}"
                 )
