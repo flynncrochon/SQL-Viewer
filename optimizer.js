@@ -29,6 +29,22 @@
     out.push({ type, value, start, end });
   }
 
+  /* The viewer passes its configured line-comment markers along with the SQL
+     snapshot; they only count at the start of a line. Without a list (the
+     Node tests) the lexer keeps the historic "#" anywhere behaviour. */
+  let lineCommentMarkers = null;
+
+  function lineCommentStart(sql, i) {
+    if (lineCommentMarkers === null) return sql[i] === '#';
+    if (!lineCommentMarkers.length) return false;
+    for (let j = i - 1; j >= 0; j--) {
+      const ch = sql[j];
+      if (ch === '\n') break;
+      if (ch !== ' ' && ch !== '\t' && ch !== '\r') return false;
+    }
+    return lineCommentMarkers.some(m => sql.startsWith(m, i));
+  }
+
   function lex(sql) {
     const out = [];
     let i = 0;
@@ -38,7 +54,7 @@
 
       if (/\s/.test(c)) { i++; continue; }
 
-      if ((c === '-' && sql[i + 1] === '-') || c === '#') {
+      if ((c === '-' && sql[i + 1] === '-') || lineCommentStart(sql, i)) {
         const start = i;
         let end = sql.indexOf('\n', i);
         if (end < 0) end = sql.length;
@@ -1641,7 +1657,11 @@
     setTimeout(() => { button.textContent = label; button.classList.remove('copied'); }, 1000);
   }
 
-  window.addEventListener('sqlviewer-open-optimizer', event => show(event.detail && event.detail.sql));
+  window.addEventListener('sqlviewer-open-optimizer', event => {
+    const detail = event.detail || {};
+    if (Array.isArray(detail.commentMarkers)) lineCommentMarkers = detail.commentMarkers.slice();
+    show(detail.sql);
+  });
   close.addEventListener('click', hide);
   close.addEventListener('keydown', event => {
     if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); hide(); }

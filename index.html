@@ -7,10 +7,14 @@
 <link rel="icon" type="image/svg+xml" href="icons/sql-viewer-brackets-vscode-balanced.svg">
 <meta name="description" content="Paste SQL, see it broken down by bracket depth, and review safe logical optimisations.">
 <link rel="preconnect" href="https://cdn.jsdelivr.net">
-<link rel="stylesheet" href="styles.css?v=bracket-select-2">
+<link rel="stylesheet" href="styles.css?v=settings-2">
 </head>
 <body>
   <header class="bar">
+    <svg class="brand-mark" viewBox="0 0 64 64" aria-hidden="true" focusable="false">
+      <path d="m25 10-14 22 14 22" fill="none" stroke="#569cd6" stroke-linecap="round" stroke-linejoin="round" stroke-width="7"/>
+      <path d="m39 10 14 22-14 22" fill="none" stroke="#4ec9b0" stroke-linecap="round" stroke-linejoin="round" stroke-width="7"/>
+    </svg>
     <button class="optimiser-button" id="optimiser" type="button" title="Open SQL Optimiser">
       <span>Optimiser</span>
     </button>
@@ -21,7 +25,25 @@
     <button class="status" id="status" type="button" title="Validity check" aria-live="polite" aria-atomic="true">
       <span id="statusText"></span>
     </button>
+    <button class="settings-button" id="settings" type="button" title="Settings" aria-label="Settings" aria-haspopup="dialog" aria-expanded="false" aria-controls="settingsPop">
+      <svg viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+        <circle cx="8" cy="8" r="2.3" fill="none" stroke="currentColor" stroke-width="1.5"/>
+        <circle cx="8" cy="8" r="5.3" fill="none" stroke="currentColor" stroke-width="2.6" stroke-dasharray="2.3 1.86"/>
+      </svg>
+    </button>
   </header>
+
+  <div class="settings-pop" id="settingsPop" role="dialog" aria-label="Settings" hidden>
+    <div class="settings-head">
+      <span>Comment markers</span>
+      <button class="settings-close" id="settingsClose" type="button" aria-label="Close settings">×</button>
+    </div>
+    <ul class="settings-markers" id="settingsMarkers"></ul>
+    <form class="settings-add" id="settingsAddForm">
+      <input id="settingsMarkerInput" type="text" placeholder="new marker" maxlength="8" spellcheck="false" autocomplete="off" aria-label="New comment marker">
+      <button class="optimiser-button" type="submit">add</button>
+    </form>
+  </div>
 
   <main class="panes">
     <section class="pane">
@@ -29,6 +51,7 @@
         <div class="hovline" id="srcHov"></div>
         <div class="curline" id="srcCur"></div>
         <div class="matchlayer" id="srcMatch" aria-hidden="true"></div>
+        <div class="boxlayer" id="srcBox" aria-hidden="true"></div>
         <div class="gutter" id="srcGut" aria-hidden="true"><div class="gutter-in" id="srcGutIn"></div></div>
         <pre class="mirror wrap" id="srcMirror" aria-hidden="true"></pre>
         <textarea id="src" spellcheck="false" autocomplete="off" autocapitalize="off"
@@ -41,6 +64,7 @@
         <div class="hovline" id="fmtHov"></div>
         <div class="curline" id="fmtCur"></div>
         <div class="matchlayer" id="fmtMatch" aria-hidden="true"></div>
+        <div class="boxlayer" id="fmtBox" aria-hidden="true"></div>
         <div class="diagline" id="fmtDiagLine" aria-hidden="true"></div>
         <div class="diag-label" id="fmtDiagLabel" aria-hidden="true"></div>
         <div class="gutter" id="fmtGut"><div class="gutter-in" id="fmtGutIn"></div></div>
@@ -76,7 +100,7 @@
   </div>
 
   <script src="https://cdn.jsdelivr.net/npm/node-sql-parser@5.4.0/umd/mysql.umd.js" defer></script>
-<script src="app.js?v=bracket-select-2" defer></script>
-<script src="optimizer.js?v=prodid-group-1" defer></script>
+<script src="app.js?v=settings-3" defer></script>
+<script src="optimizer.js?v=settings-1" defer></script>
 </body>
 </html>

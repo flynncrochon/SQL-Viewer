@@ -97,6 +97,42 @@ const isDigit = c => c >= '0' && c <= '9';
 const WORD_START = /[A-Za-z_@$-￿]/;
 const WORD_CHAR = /[A-Za-z0-9_@$#-￿]/;
 
+/* Line-comment markers are a user setting (the gear in the top bar). A marker
+   only counts when it is the first thing on its line, so a quote that opens a
+   string mid-line is never mistaken for a comment. "--" and block comments
+   are standard SQL and are always recognised anywhere. */
+const MARKERS_KEY = 'sqlviewer.commentMarkers';
+const DEFAULT_COMMENT_MARKERS = ["'", '#'];
+let commentMarkers = loadCommentMarkers();
+
+function loadCommentMarkers() {
+  try {
+    const raw = localStorage.getItem(MARKERS_KEY);
+    if (raw === null) return DEFAULT_COMMENT_MARKERS.slice();
+    const list = JSON.parse(raw);
+    if (Array.isArray(list)) return list.filter(m => typeof m === 'string' && m.length > 0);
+  } catch { /* storage unavailable or corrupt: use the defaults */ }
+  return DEFAULT_COMMENT_MARKERS.slice();
+}
+
+function atLineStart(text, i) {
+  for (let j = i - 1; j >= 0; j--) {
+    const c = text[j];
+    if (c === '\n') return true;
+    if (c !== ' ' && c !== '\t' && c !== '\r') return false;
+  }
+  return true;
+}
+
+/* '' when no line comment starts here, 'std' for "--", 'own' for a configured
+   marker (which the formatter and normaliser must keep on its own line). */
+function lineCommentAt(text, i) {
+  if (text[i] === '-' && text[i + 1] === '-') return 'std';
+  if (!commentMarkers.length || !atLineStart(text, i)) return '';
+  for (const m of commentMarkers) if (text.startsWith(m, i)) return 'own';
+  return '';
+}
+
 const OPS3 = ['<=>'];
 const OPS2 = ['<=', '>=', '<>', '!=', '||', '&&', '::', ':=', '->', '=>', '<<', '>>'];
 
@@ -113,9 +149,10 @@ function tokenize(sql) {
       out.push({ t: 'ws', v: sql.slice(i, j), start: i, end: j }); i = j; continue;
     }
 
-    if ((c === '-' && sql[i + 1] === '-') || c === '#') {
+    const lineComment = lineCommentAt(sql, i);
+    if (lineComment) {
       let j = sql.indexOf('\n', i); if (j < 0) j = n;
-      out.push({ t: 'comment', v: sql.slice(i, j), line: true, start: i, end: j }); i = j; continue;
+      out.push({ t: 'comment', v: sql.slice(i, j), line: true, own: lineComment === 'own', start: i, end: j }); i = j; continue;
     }
 
     if (c === '/' && sql[i + 1] === '*') {
@@ -475,6 +512,7 @@ function emitBody(items, indent, w) {
       else if (it.up === 'END') { caseLvl = Math.max(0, caseLvl - 1); w.nl(); }
     }
 
+    if (it.t === 'comment' && it.own) w.nl();
     w.push(it, indent + caseLvl);
 
     if (it.t === 'word' && it.up === 'CASE') { caseLvl++; w.nl(); }
@@ -549,8 +587,8 @@ function oneLine(sql) {
   let out = '', prev = null;
   for (const tk of tokensFor(sql)) {
     if (tk.t === 'ws') continue;
-    if (tk.t === 'comment' && tk.line) {         // -- runs to end of line
-      out += (prev ? ' ' : '') + tk.v + '\n';
+    if (tk.t === 'comment' && tk.line) {         // runs to end of line
+      out += (prev ? (tk.own ? '\n' : ' ') : '') + tk.v + '\n';
       prev = null;
       continue;
     }
@@ -559,6 +597,99 @@ function oneLine(sql) {
     prev = tk;
   }
   return out;
+}
+
+/* Carry an edit made on the formatted side back into the source without
+   disturbing the source's own line breaks and indentation. Source and
+   formatted text share one token sequence, so the tokens that still match at
+   both ends are kept exactly as the user wrote them and only the changed run
+   in between is rewritten, in the compact one-line shape. A whitespace-only
+   edit on the right changes nothing. `oldFull` is the formatted text before
+   the edit; it tells a line break the user typed apart from one the formatter
+   laid out. */
+function codeTokens(text) {
+  return tokensFor(text).filter(tk => tk.t !== 'ws');
+}
+
+function wsBefore(text, toks, i) {
+  const at = i < toks.length ? toks[i].start : text.length;
+  const from = i > 0 ? toks[i - 1].end : 0;
+  return text.slice(from, at);
+}
+
+/* When an inserted or deleted run is ambiguous (e.g. "AND b = 2" added next
+   to an identical clause), prefer the window that starts on a line of its
+   own so untouched lines keep their breaks. */
+function slideWindow(text, toks, p, q, w) {
+  let lo = p;
+  while (lo > 0 && toks[lo - 1].v === toks[lo + w - 1].v) lo--;
+  let hi = p;
+  while (hi + w < toks.length && toks[hi].v === toks[hi + w].v) hi++;
+  for (let k = lo; k <= hi; k++) {
+    if (wsBefore(text, toks, k).includes('\n')) return [k, toks.length - w - k];
+  }
+  return [p, q];
+}
+
+function mergeSource(source, oldFull, nextFull) {
+  const a = codeTokens(source);
+  const b = codeTokens(nextFull);
+  const max = Math.min(a.length, b.length);
+  let p = 0;
+  while (p < max && a[p].v === b[p].v) p++;
+  let q = 0;
+  while (q < max - p && a[a.length - 1 - q].v === b[b.length - 1 - q].v) q++;
+  if (p === a.length && p === b.length) return source;
+  if (p + q === a.length) [p, q] = slideWindow(nextFull, b, p, q, b.length - a.length);
+  else if (p + q === b.length) [p, q] = slideWindow(source, a, p, q, a.length - b.length);
+
+  const sStart = p ? a[p - 1].end : 0;
+  const sEnd = q ? a[a.length - q].start : source.length;
+  const fStart = p ? b[p - 1].end : 0;
+  const fEnd = q ? b[b.length - q].start : nextFull.length;
+  const region = source.slice(sStart, sEnd);
+  const lead = region.match(/^\s*/)[0];
+  const trail = region.match(/\s*$/)[0];
+  const prefix = source.slice(0, sStart);
+  const suffix = source.slice(sEnd);
+  const middle = oneLine(nextFull.slice(fStart, fEnd));
+
+  /* A join the source has no whitespace for: keep a line break only when the
+     source is already multi-line and the break is new on the right (typed by
+     the user rather than laid out by the formatter). */
+  const c = typeof oldFull === 'string' ? codeTokens(oldFull) : null;
+  const sameLayout = c && c.length === a.length;
+  const typedBreak = (nextWs, oldWs) => nextWs.includes('\n') && (oldWs === null || oldWs !== nextWs);
+  const multiLine = source.includes('\n');
+  const indentAt = pos => source.slice(source.lastIndexOf('\n', pos - 1) + 1, pos).match(/^[ \t]*/)[0];
+  const joinWs = (nextWs, oldWs, prev, next, indentFrom) => {
+    if (multiLine && typedBreak(nextWs, oldWs)) return '\n' + indentAt(indentFrom);
+    return needSpace(prev, next) ? ' ' : '';
+  };
+  const afterPrefixOld = sameLayout ? wsBefore(oldFull, c, p) : null;
+  const beforeSuffixOld = sameLayout ? wsBefore(oldFull, c, c.length - q) : null;
+  const afterPrefixNew = wsBefore(nextFull, b, p);
+  const beforeSuffixNew = wsBefore(nextFull, b, b.length - q);
+  const prefixIsLineComment = p > 0 && a[p - 1].t === 'comment' && a[p - 1].line;
+
+  if (!middle) {
+    if (!p && !q) return '';
+    if (!p) return lead + suffix;
+    if (!q) return prefix + trail;
+    let sep = trail.includes('\n') ? trail : lead.includes('\n') ? lead : (trail || lead);
+    if (!sep) sep = joinWs('', null, a[p - 1], a[a.length - q], a[a.length - q].start);
+    if (prefixIsLineComment && !sep.includes('\n')) sep = '\n';
+    return prefix + sep + suffix;
+  }
+
+  const mid = codeTokens(middle);
+  let pre = lead;
+  if (p && !pre) pre = joinWs(afterPrefixNew, afterPrefixOld, a[p - 1], mid[0], a[p - 1].start);
+  if (prefixIsLineComment && !pre.includes('\n')) pre = '\n';
+  let post = trail;
+  if (q && !post) post = joinWs(beforeSuffixNew, beforeSuffixOld, mid[mid.length - 1], a[a.length - q], a[a.length - q].start);
+  if (middle.endsWith('\n')) post = post.replace(/^[^\n]*\n?/, '');
+  return prefix + pre + middle + post + suffix;
 }
 
 /* `indent` is dropped for the closing line of a collapsed chain, which gets
@@ -826,6 +957,7 @@ function unknownFunctionDiagnostics(sql) {
    only the parser's private copy; the source and formatted text stay intact. */
 function parserInput(sql) {
   return tokensFor(sql).map(tk => {
+    if (tk.t === 'comment') return tk.v.replace(/[^\n]/g, ' ');
     if (tk.t === 'qid' && tk.quote === '[' && tk.closed) {
       return `\`${tk.v.slice(1, -1)}\``;
     }
@@ -956,6 +1088,7 @@ const srcEditor = document.getElementById('srcEditor');
 const srcGutIn = document.getElementById('srcGutIn');
 const srcCur = document.getElementById('srcCur');
 const srcMatch = document.getElementById('srcMatch');
+const srcBox = document.getElementById('srcBox');
 
 const fmt = document.getElementById('fmt');
 const fmtMirror = document.getElementById('fmtMirror');
@@ -963,6 +1096,7 @@ const fmtEditor = document.getElementById('fmtEditor');
 const fmtGutIn = document.getElementById('fmtGutIn');
 const fmtCur = document.getElementById('fmtCur');
 const fmtMatch = document.getElementById('fmtMatch');
+const fmtBox = document.getElementById('fmtBox');
 const srcHov = document.getElementById('srcHov');
 const fmtHov = document.getElementById('fmtHov');
 const fmtDiagLine = document.getElementById('fmtDiagLine');
@@ -993,6 +1127,9 @@ let fmtScrollPadding = 0;
 let fmtScrollLimit = null;
 const hoverY = new WeakMap();
 let diagnostics = [];
+/* the extra carets, and the column drag building them; see the section below */
+let multi = null;
+let boxDrag = null;
 let activeDiagnostic = -1;
 let diagnosticNavigated = false;
 
@@ -1710,6 +1847,7 @@ function syncCarets(navigate = false) {
     fmtCur.style.display = 'none';
     clearBrackets();
     paintMatches();
+    paintMulti();
     return;
   }
 
@@ -1737,6 +1875,7 @@ function syncCarets(navigate = false) {
   paintCaretLine(srcMirror, srcEditor, srcCur, src.value, atSrc, true);
   paintCaretLine(fmtMirror, fmtEditor, fmtCur, fmt.value, atFmt, true);
   paintMatches();
+  paintMulti();
   markBrackets();
 }
 
@@ -1805,7 +1944,7 @@ function parenPositions(text) {
   while (i < n) {
     const c = text[i];
 
-    if ((c === '-' && text[i + 1] === '-') || c === '#') {          // -- and # to EOL
+    if (lineCommentAt(text, i)) {                                   // -- and markers to EOL
       const nl = text.indexOf('\n', i);
       i = nl < 0 ? n : nl;
       continue;
@@ -1929,6 +2068,8 @@ let wordHighlightArmed = false;
 function selectionNeedle() {
   const ta = document.activeElement;
   if (ta !== src && ta !== fmt) return null;
+  // with a set of carets there is no single selection to look for copies of
+  if (multi && multi.carets.length > 1) return null;
 
   const value = ta.value;
   let from = ta.selectionStart, to = ta.selectionEnd, kind = 'match';
@@ -2032,8 +2173,10 @@ function matchBoxesFor(range, editorRect, rowTop, lh) {
   let html = '';
   for (const [wrapped, box] of wraps) {
     const top = rowTop + wrapped * lh - editorRect.top;
-    html += `<i style="left:${box.left - editorRect.left}px;top:${top}px`
-      + `;width:${box.right - box.left}px;height:${lh}px"></i>`;
+    const left = snapPx(box.left - editorRect.left);
+    const right = snapPx(box.right - editorRect.left);
+    html += `<i style="left:${left}px;top:${top}px`
+      + `;width:${right - left}px;height:${lh}px"></i>`;
   }
   return html;
 }
@@ -2432,7 +2575,7 @@ function fromFmt() {
     const fullEnd = selected.end;
     const nextMap = updateSelectionMap(oldMap, change, fullStart, fullEnd, nextShown, nextFull);
 
-    const sql = oneLine(nextFull);
+    const sql = mergeSource(src.value, oldMap.fullText, nextFull);
     src.value = sql;
     schedulePersist(sql);
     clearDiagnostics();
@@ -2483,7 +2626,7 @@ function fromFmt() {
   const nextMap = updateSelectionMap(
     oldMap, change, selected.start, selected.end, fmt.value, nextFull,
   );
-  const sql = oneLine(nextFull);
+  const sql = mergeSource(src.value, oldMap.fullText, nextFull);
   src.value = sql;
   schedulePersist(sql);
   clearDiagnostics();
@@ -2520,6 +2663,7 @@ function fromFmt() {
 }
 
 function settleFmt() {
+  exitMulti();
   if (!fmtDirty) return;
   clearTimeout(editPaintTimer);
   editPaintTimer = 0;
@@ -2744,6 +2888,7 @@ function scheduleHistoryCleanPaint() {
 }
 
 function restoreHistoryState(state) {
+  exitMulti();
   const current = captureHistoryState();
   historyApplying = true;
   try {
@@ -2867,7 +3012,7 @@ function consumeHistoryInput(e) {
    the viewer itself is never changed by opening or viewing it. */
 function openOptimizer() {
   window.dispatchEvent(new CustomEvent('sqlviewer-open-optimizer', {
-    detail: { sql: src.value }
+    detail: { sql: src.value, commentMarkers: commentMarkers.slice() }
   }));
 }
 
@@ -2964,7 +3109,7 @@ function deleteCollapsedFold(inputType) {
   for (const line of removedLines) folded.delete(line);
   fmt.value = nextShown;
   fmt.setSelectionRange(displayStart, displayStart);
-  const sql = oneLine(nextFull);
+  const sql = mergeSource(src.value, map.fullText, nextFull);
   src.value = sql;
   schedulePersist(sql);
   clearDiagnostics();
@@ -2996,6 +3141,819 @@ function deleteCollapsedFold(inputType) {
   finishHistoryAction('fmt-block');
   return true;
 }
+
+/* ---- extra carets and column (box) selection ---- */
+
+/* A textarea has exactly one selection and one caret, so everything past the
+   first caret is ours to draw and ours to edit with. `multi` holds the whole
+   set while it is live; the textarea's own selection is kept collapsed on the
+   primary caret, which leaves the rest of the app - the mirrored caret in the
+   other pane, revealing, the history snapshots - working unchanged.
+
+   Columns are counted in characters rather than pixels. The font is monospace
+   and the indentation is real spaces, so the two agree, and a character column
+   is the one thing that survives a soft-wrapped source row. */
+
+const PANES = [
+  { ta: src, mirror: srcMirror, editor: srcEditor, box: srcBox, tag: 'src' },
+  { ta: fmt, mirror: fmtMirror, editor: fmtEditor, box: fmtBox, tag: 'fmt' },
+];
+
+/* One monospace cell. Only needed where the rendered text runs out - an empty
+   row has no glyph to measure, and a drag past the end of a short line still
+   has to name the column it is over. */
+let cellWidths = new WeakMap();
+
+function cellWidth(mirrorEl) {
+  const hit = cellWidths.get(mirrorEl);
+  if (hit) return hit;
+  const probe = document.createElement('i');
+  probe.textContent = '0'.repeat(20);
+  probe.style.cssText = 'position:absolute;visibility:hidden;white-space:pre;font:inherit';
+  mirrorEl.appendChild(probe);
+  const measured = probe.getBoundingClientRect().width / 20;
+  probe.remove();
+  const w = measured > 0 ? measured : parseFloat(getComputedStyle(mirrorEl).fontSize) * 0.6;
+  cellWidths.set(mirrorEl, w);
+  return w;
+}
+
+/* A zoom change or a late font swap changes the advance, so the cached cell
+   is only trusted until either happens. */
+window.addEventListener('resize', () => { cellWidths = new WeakMap(); });
+if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => { cellWidths = new WeakMap(); });
+
+/* Box edges land on whole device pixels. Rows measured a few hundredths of a
+   pixel apart otherwise antialias to different columns, and the edge of the
+   rectangle reads as ragged instead of straight. */
+function snapPx(v) {
+  const d = window.devicePixelRatio || 1;
+  return Math.round(v * d) / d;
+}
+
+function lineBounds(text, starts, row) {
+  const start = starts[row];
+  return [start, row + 1 < starts.length ? starts[row + 1] - 1 : text.length];
+}
+
+function primaryCaret() {
+  if (!multi || !multi.carets.length) return null;
+  return multi.carets[Math.min(multi.primary, multi.carets.length - 1)];
+}
+
+/* Carets are kept sorted and disjoint, so an edit can walk them once and the
+   set never grows a pair that would delete the same character twice. Two that
+   run together become one, exactly as they do when a selection is dragged over
+   another. */
+/* `keepAt` indexes `list` rather than naming one of its objects, because the
+   result is always freshly built - a caller that kept a reference to what it
+   passed in (the drag holds on to the set it is adding to) would otherwise see
+   its own carets merged out from under it. */
+function normalizeCarets(list, keepAt) {
+  const items = list
+    .map((c, i) => ({
+      a: c.a, h: c.h, goal: c.goal, from: i,
+      pad: c.pad || 0, padL: c.padL || 0, padR: c.padR || 0,
+    }))
+    .sort((x, y) =>
+      Math.min(x.a, x.h) - Math.min(y.a, y.h) || Math.max(x.a, x.h) - Math.max(y.a, y.h));
+  const carets = [];
+  let primary = 0;
+
+  for (const c of items) {
+    const prev = carets[carets.length - 1];
+    const cs = Math.min(c.a, c.h), ce = Math.max(c.a, c.h);
+    let merged = false;
+    if (prev) {
+      const ps = Math.min(prev.a, prev.h), pe = Math.max(prev.a, prev.h);
+      // touching only joins two carets when one of them actually covers text
+      if (cs < pe || (cs === pe && (ps < pe || cs < ce || ps === cs))) {
+        const s = Math.min(ps, cs), e = Math.max(pe, ce);
+        const forward = c.h >= c.a;
+        prev.a = forward ? s : e;
+        prev.h = forward ? e : s;
+        prev.goal = c.goal;
+        prev.pad = c.pad;
+        prev.padL = c.padL;
+        prev.padR = c.padR;
+        merged = true;
+      }
+    }
+    if (!merged) carets.push({ a: c.a, h: c.h, goal: c.goal, pad: c.pad, padL: c.padL, padR: c.padR });
+    if (c.from === keepAt) primary = carets.length - 1;
+  }
+  return { carets, primary };
+}
+
+function setCarets(ta, list, keepAt) {
+  const { carets, primary } = normalizeCarets(list, keepAt);
+  if (!carets.length) { exitMulti(); return; }
+  multi = { ta, carets, primary };
+  const head = primaryCaret();
+  if (ta.selectionStart !== head.h || ta.selectionEnd !== head.h) ta.setSelectionRange(head.h, head.h);
+  paintMulti();
+}
+
+/* One caret is just a caret. Hand it back to the textarea so selecting,
+   dragging and the browser's own key handling all behave normally again. */
+function settleCarets() {
+  if (multi && multi.carets.length <= 1) exitMulti(true);
+}
+
+function exitMulti(restore = false) {
+  if (!multi) return;
+  const ta = multi.ta;
+  const c = restore ? primaryCaret() : null;
+  multi = null;
+  if (c) {
+    const s = Math.min(c.a, c.h), e = Math.max(c.a, c.h);
+    ta.setSelectionRange(s, e, c.h >= c.a ? 'forward' : 'backward');
+  }
+  paintMulti();
+}
+
+/* ---- drawing them ---- */
+
+function paintMulti() {
+  if (multi) {
+    // a fold, an undo or a reformat can move the text out from under the set
+    const max = multi.ta.value.length;
+    if (multi.carets.some(c => c.a > max || c.h > max)) multi = null;
+  }
+  for (const pane of PANES) {
+    const on = Boolean(multi) && multi.ta === pane.ta;
+    const html = on ? multiHtml(pane) : '';
+    if (pane.box.innerHTML !== html) pane.box.innerHTML = html;
+    pane.editor.classList.toggle('multi', on);
+  }
+}
+
+/* Only what is on screen is measured, for the same reason the match layer
+   skips the rest: a box down a long document is one client rect per row.
+
+   Rows that do not wrap are not measured one by one. Column x is read once,
+   off the longest plain row the set touches, and every row of the box is
+   drawn between those same two values. Measuring each row separately left
+   edges a fraction of a pixel apart, and at some zoom levels that fraction
+   fell either side of a device pixel and bent the rectangle. Rows that wrap,
+   contain tabs, or hold non-ASCII glyphs keep the per-row measurement, since
+   their columns do not sit on one grid. */
+const PLAIN_ROW = /^[\x20-\x7e]*$/;
+
+function multiHtml(pane) {
+  const rows = pane.mirror.children;
+  if (!rows.length) return '';
+  const text = pane.ta.value;
+  const starts = textLineStarts(text);
+  const editorRect = pane.editor.getBoundingClientRect();
+  const lh = parseFloat(getComputedStyle(pane.mirror).lineHeight);
+  const cw = cellWidth(pane.mirror);
+
+  const info = new Map();
+  const rowInfo = r => {
+    let it = info.get(r);
+    if (it === undefined) {
+      const rowEl = rows[r];
+      const rowRect = rowEl.getBoundingClientRect();
+      const [lineStart, lineEnd] = lineBounds(text, starts, r);
+      it = {
+        rowEl, rowRect, lineStart, len: lineEnd - lineStart,
+        onScreen: rowRect.bottom > editorRect.top && rowRect.top < editorRect.bottom,
+        gridded: rowRect.height < lh * 1.5 && PLAIN_ROW.test(text.slice(lineStart, lineEnd)),
+      };
+      info.set(r, it);
+    }
+    return it;
+  };
+
+  let ruler = null;
+  const spans = multi.carets.map(c => {
+    const from = Math.min(c.a, c.h), to = Math.max(c.a, c.h);
+    const first = displayRowAtStarts(starts, from);
+    const last = Math.min(displayRowAtStarts(starts, to), rows.length - 1);
+    for (let r = first; r <= last; r++) {
+      const it = rowInfo(r);
+      if (it.onScreen && it.gridded && (!ruler || it.len > ruler.len)) ruler = it;
+    }
+    return { c, from, to, first, last };
+  });
+  const colX = columnRuler(ruler, editorRect, cw);
+
+  let html = '';
+  for (const { c, from, to, first, last } of spans) {
+    const padL = c.padL || 0, padR = c.padR || 0;
+    const single = first === last && first < rows.length && rowInfo(first).gridded;
+    if (from !== to || padR > padL) {
+      for (let r = first; r <= last && r < rows.length; r++) {
+        const it = rowInfo(r);
+        if (!it.onScreen) continue;
+        const a = Math.max(from, it.lineStart) - it.lineStart;
+        const b = Math.min(to, it.lineStart + it.len) - it.lineStart;
+        if (single) {
+          const x1 = colX(a + padL), x2 = colX(b + padR);
+          if (x2 > x1) {
+            html += `<i style="left:${x1}px;top:${it.rowRect.top - editorRect.top}px`
+              + `;width:${x2 - x1}px;height:${lh}px"></i>`;
+          }
+        } else {
+          // matchBoxesFor already merges by wrapped row and snaps to the row grid
+          if (b > a) html += matchBoxesFor(rangeSpan(it.rowEl, a, b), editorRect, it.rowRect.top, lh);
+          /* The stretch of the box past the end of a short line. There is no
+             text under it to measure, so it is laid out on the cell grid. */
+          if (padR > padL && r === last) {
+            html += virtualBox(it.rowEl, it.rowRect, it.len, padL, padR, editorRect, lh, cw);
+          }
+        }
+      }
+    }
+    const headRow = displayRowAtStarts(starts, c.h);
+    if (single && headRow === first) {
+      const it = rowInfo(first);
+      if (it.onScreen) {
+        const x = colX(c.h - it.lineStart + (c.pad || 0));
+        html += `<b style="left:${x}px;top:${it.rowRect.top - editorRect.top}px;height:${lh}px"></b>`;
+      }
+    } else {
+      html += caretHtml(rows, starts, text, c.h, c.pad || 0, editorRect, lh, cw);
+    }
+  }
+  return html;
+}
+
+/* Column -> x, relative to the editor and snapped to the device grid. Read off
+   the ruler row's own glyphs where it has them; columns past its end step on
+   in that row's measured advance, or the probe's cell when there is no row. */
+function columnRuler(ruler, editorRect, cw) {
+  const cache = new Map();
+  const left = ruler ? ruler.rowRect.left : editorRect.left;
+  const len = ruler ? ruler.len : 0;
+  let end = left, adv = cw;
+  if (ruler && len > 0) {
+    const r = rangeSpan(ruler.rowEl, len - 1, len).getBoundingClientRect();
+    if (r.width) { end = r.right; adv = (end - left) / len; }
+  }
+  return col => {
+    let x = cache.get(col);
+    if (x !== undefined) return x;
+    let abs;
+    if (ruler && col < len) {
+      const r = rangeSpan(ruler.rowEl, col, col + 1).getBoundingClientRect();
+      abs = r.width ? r.left : left + col * adv;
+    } else {
+      abs = end + (col - len) * adv;
+    }
+    x = snapPx(abs - editorRect.left);
+    cache.set(col, x);
+    return x;
+  };
+}
+
+function virtualBox(rowEl, rowRect, len, padL, padR, editorRect, lh, cw) {
+  const rect = rangeAt(rowEl, len).getBoundingClientRect();
+  const wrapped = rect.height ? Math.round((rect.top - rowRect.top) / lh) : 0;
+  const endX = rect.height ? rect.left : rowRect.left + len * cw;
+  /* Step on in this row's own glyph advance where it has text to measure.
+     The probe's average can sit a fraction of a pixel off a snapped advance,
+     and that fraction, times the columns of padding, is what used to bend
+     the edge on the rows the box runs past. */
+  const adv = rect.height && len > 0 && !wrapped ? (rect.left - rowRect.left) / len : cw;
+  const left = snapPx(endX + padL * adv - editorRect.left);
+  const right = snapPx(endX + padR * adv - editorRect.left);
+  return `<i style="left:${left}px`
+    + `;top:${rowRect.top - editorRect.top + wrapped * lh}px`
+    + `;width:${right - left}px;height:${lh}px"></i>`;
+}
+
+function caretHtml(rows, starts, text, at, pad, editorRect, lh, cw) {
+  const row = displayRowAtStarts(starts, at);
+  if (row >= rows.length) return '';
+  const rowEl = rows[row];
+  const rowRect = rowEl.getBoundingClientRect();
+  if (rowRect.bottom <= editorRect.top || rowRect.top >= editorRect.bottom) return '';
+
+  const col = at - starts[row];
+  const rect = rangeAt(rowEl, col).getBoundingClientRect();
+  /* An empty row is a lone <br> with nothing to measure, so fall back to the
+     cell grid; everywhere else the rendered position is the honest one. */
+  const wrapped = rect.height ? Math.round((rect.top - rowRect.top) / lh) : 0;
+  const adv = rect.height && col > 0 && !wrapped ? (rect.left - rowRect.left) / col : cw;
+  const left = snapPx((rect.height ? rect.left : rowRect.left + col * cw)
+    + pad * adv - editorRect.left);
+  const top = rowRect.top - editorRect.top + wrapped * lh;
+  return `<b style="left:${left}px;top:${top}px;height:${lh}px"></b>`;
+}
+
+/* ---- the drag ---- */
+
+/* Which row and column the pointer is over, clamped rather than refused: a
+   drag that leaves the text still has a corner, and it is the nearest one. */
+function pointToRowCol(pane, clientX, clientY) {
+  const text = pane.ta.value;
+  const starts = textLineStarts(text);
+  const rows = pane.mirror.children;
+  if (!rows.length) return { row: 0, col: 0 };
+
+  let row;
+  if (clientY < rows[0].getBoundingClientRect().top) row = 0;
+  else if (clientY >= rows[rows.length - 1].getBoundingClientRect().bottom) row = rows.length - 1;
+  else {
+    let lo = 0, hi = rows.length - 1;
+    row = rows.length - 1;
+    while (lo <= hi) {
+      const mid = (lo + hi) >> 1;
+      const r = rows[mid].getBoundingClientRect();
+      if (clientY < r.top) hi = mid - 1;
+      else if (clientY >= r.bottom) lo = mid + 1;
+      else { row = mid; break; }
+    }
+    if (lo > hi) row = Math.min(rows.length - 1, Math.max(0, lo));
+  }
+  row = Math.min(row, starts.length - 1);
+
+  const rowLeft = rows[Math.min(row, rows.length - 1)].getBoundingClientRect().left;
+  const col = Math.max(0, Math.round((clientX - rowLeft) / cellWidth(pane.mirror)));
+  return { row, col };
+}
+
+/* One caret per line between the two corners. A line too short to reach the
+   box keeps its caret out at the column anyway, held there by `pad` - virtual
+   columns past the end of the line. That is what makes the set read as one
+   straight vertical line down ragged text instead of following each line's
+   end, and typing pads the short lines out so the text lands in the column
+   too. `padL` and `padR` carry the same idea for the box's two edges, so the
+   rectangle keeps its shape over short and empty lines. */
+function boxCarets(ta, anchor, head) {
+  const text = ta.value;
+  const starts = textLineStarts(text);
+  const first = Math.min(anchor.row, head.row);
+  const last = Math.min(Math.max(anchor.row, head.row), starts.length - 1);
+  const left = Math.min(anchor.col, head.col);
+  const right = Math.max(anchor.col, head.col);
+  const out = [];
+
+  for (let r = first; r <= last; r++) {
+    const [lineStart, lineEnd] = lineBounds(text, starts, r);
+    const len = lineEnd - lineStart;
+    const s = lineStart + Math.min(left, len);
+    const e = lineStart + Math.min(right, len);
+    const padL = Math.max(0, left - len);
+    const padR = Math.max(0, right - len);
+    /* The caret goes on the left edge whichever way the box was dragged. That
+       is the column you are about to type in, and it is the edge that has to
+       stay in view - anchoring on the far side would scroll a wide box off to
+       the right and put every caret where the text ends up rather than where
+       it starts. */
+    out.push({ a: e, h: s, pad: padL, padL, padR });
+  }
+  return out;
+}
+
+function updateBoxDrag() {
+  if (!boxDrag) return;
+  const pane = boxDrag.pane;
+  const head = pointToRowCol(pane, boxDrag.x, boxDrag.y);
+  const list = boxCarets(pane.ta, boxDrag.anchor, head);
+  const onHead = Math.max(0, Math.min(list.length - 1, head.row - Math.min(boxDrag.anchor.row, head.row)));
+  setCarets(pane.ta, boxDrag.base.concat(list), boxDrag.base.length + onHead);
+}
+
+/* Dragging to a row that is not on screen has to bring it on screen. The
+   textarea is the only scroll source, so nudge it and let its scroll handler
+   carry the mirror and the gutter along as usual. */
+const DRAG_EDGE = 18;
+const DRAG_STEP = 32;
+
+function dragScroll() {
+  if (!boxDrag) return;
+  const ta = boxDrag.pane.ta;
+  const rect = ta.getBoundingClientRect();
+  let dy = 0, dx = 0;
+  if (boxDrag.y < rect.top + DRAG_EDGE) dy = -DRAG_STEP;
+  else if (boxDrag.y > rect.bottom - DRAG_EDGE) dy = DRAG_STEP;
+  if (boxDrag.x < rect.left + DRAG_EDGE) dx = -DRAG_STEP;
+  else if (boxDrag.x > rect.right - DRAG_EDGE) dx = DRAG_STEP;
+
+  if (dy || dx) {
+    const top = ta.scrollTop, left = ta.scrollLeft;
+    ta.scrollTop += dy;
+    ta.scrollLeft += dx;
+    if (ta.scrollTop !== top || ta.scrollLeft !== left) updateBoxDrag();
+  }
+  boxDrag.raf = requestAnimationFrame(dragScroll);
+}
+
+function endBoxDrag() {
+  if (!boxDrag) return;
+  if (boxDrag.raf) cancelAnimationFrame(boxDrag.raf);
+  const { pane, id } = boxDrag;
+  boxDrag = null;
+  if (id >= 0 && pane.ta.hasPointerCapture(id)) pane.ta.releasePointerCapture(id);
+  settleCarets();
+}
+
+/* ---- editing through the whole set ---- */
+
+/* The formatted pane hides collapsed blocks behind a three character pill.
+   Editing into one would leave half a fold on screen, so a set that reaches
+   any of them declines the edit rather than taking part of it. */
+function editsTouchFold(ta, edits) {
+  if (ta !== fmt || !folded.size) return false;
+  const markers = fmtSelectionMap.markers || [];
+  return edits.some(ed => markers.some(m => (ed.start === ed.end
+    ? ed.start > m.start && ed.start < m.end
+    : ed.start < m.end && ed.end > m.start)));
+}
+
+/* Rebuild the value in one pass, left to right. Applying the edits in place
+   would move every offset after the first one; walking them in order instead
+   means each caret's new home is simply where the write stopped. */
+function applyMulti(edits, target) {
+  const ta = multi.ta;
+  if (editsTouchFold(ta, edits)) return;
+
+  const value = ta.value;
+  let out = '', at = 0;
+  const next = [];
+  for (const ed of edits) {
+    const start = Math.max(ed.start, at);
+    const end = Math.max(ed.end, start);
+    out += value.slice(at, start) + ed.text;
+    const pad = ed.pad || 0;
+    next.push({ a: out.length, h: out.length, pad, padL: pad, padR: pad });
+    at = end;
+  }
+  out += value.slice(at);
+
+  const keep = Math.min(multi.primary, next.length - 1);
+  if (out === value) { setCarets(ta, next, keep); return; }
+
+  const { carets, primary } = normalizeCarets(next, keep);
+  beginHistoryAction(target);
+  multi = { ta, carets, primary };
+  ta.value = out;
+  const head = primaryCaret();
+  ta.setSelectionRange(head.h, head.h);
+  ta.dispatchEvent(new Event('input'));
+  paintMulti();
+}
+
+const caretRange = c => [Math.min(c.a, c.h), Math.max(c.a, c.h)];
+
+/* Backspace over the low half of a surrogate pair would leave a broken
+   character behind, so a pair is stepped over whole. */
+function stepBack(text, at) {
+  if (at <= 0) return 0;
+  const c = text.charCodeAt(at - 1);
+  if (c >= 0xDC00 && c <= 0xDFFF && at > 1) {
+    const p = text.charCodeAt(at - 2);
+    if (p >= 0xD800 && p <= 0xDBFF) return at - 2;
+  }
+  return at - 1;
+}
+
+function stepForward(text, at) {
+  if (at >= text.length) return text.length;
+  const c = text.charCodeAt(at);
+  if (c >= 0xD800 && c <= 0xDBFF && at + 1 < text.length) {
+    const n = text.charCodeAt(at + 1);
+    if (n >= 0xDC00 && n <= 0xDFFF) return at + 2;
+  }
+  return at + 1;
+}
+
+function wordStep(text, at, dir) {
+  let i = at;
+  if (dir < 0) {
+    if (i > 0 && text[i - 1] === '\n') return i - 1;
+    while (i > 0 && !isWordChar(text[i - 1]) && text[i - 1] !== '\n') i--;
+    while (i > 0 && isWordChar(text[i - 1])) i--;
+    return i === at ? stepBack(text, at) : i;
+  }
+  if (i < text.length && text[i] === '\n') return i + 1;
+  while (i < text.length && !isWordChar(text[i]) && text[i] !== '\n') i++;
+  while (i < text.length && isWordChar(text[i])) i++;
+  return i === at ? stepForward(text, at) : i;
+}
+
+const lineStartOf = (text, at) => text.lastIndexOf('\n', Math.max(0, at - 1)) + 1;
+
+function lineEndOf(text, at) {
+  const nl = text.indexOf('\n', at);
+  return nl < 0 ? text.length : nl;
+}
+
+/* Home alternates between the first real character and column zero, the way
+   both Visual Studio and VS Code do it. */
+function homeOf(text, at) {
+  const start = lineStartOf(text, at);
+  const end = lineEndOf(text, at);
+  let i = start;
+  while (i < end && (text[i] === ' ' || text[i] === '\t')) i++;
+  return at === i ? start : i;
+}
+
+/* A caret held out past the end of its line has to bring the line with it, or
+   the text would land at the line's end and break the column the box drew.
+   Only a bare caret pads: replacing a selection puts the text at its left
+   edge, which is already square with the other lines. */
+const leadFor = (c, start, end) => (start === end ? ' '.repeat(c.pad || 0) : '');
+
+function insertEdits(data) {
+  return multi.carets.map(c => {
+    const [start, end] = caretRange(c);
+    return { start, end, text: leadFor(c, start, end) + data };
+  });
+}
+
+function enterEdits() {
+  const text = multi.ta.value;
+  return multi.carets.map(c => {
+    const [start, end] = caretRange(c);
+    return { start, end, text: `\n${enterIndent(text, start)}` };
+  });
+}
+
+/* One line per caret if the clipboard holds exactly that many, which is what a
+   column copy produced in the first place; otherwise every caret gets the lot. */
+function pasteEdits(data) {
+  const lines = data.split(/\r\n|\r|\n/);
+  const spread = lines.length > 1 && lines.length === multi.carets.length;
+  return multi.carets.map((c, i) => {
+    const [start, end] = caretRange(c);
+    return { start, end, text: leadFor(c, start, end) + (spread ? lines[i] : data) };
+  });
+}
+
+function deleteEdits(inputType) {
+  const text = multi.ta.value;
+  const backward = inputType.includes('Backward');
+  const word = inputType.includes('Word');
+  const wholeLine = inputType.includes('Line');
+
+  const directional = backward || inputType.includes('Forward');
+
+  return multi.carets.map(c => {
+    let [start, end] = caretRange(c);
+    const padL = c.padL || 0, padR = c.padR || 0;
+    if (start !== end) return { start, end, text: '' };
+
+    /* A box crossing a line too short to reach it holds nothing to take on
+       that line, and the column it drew is still where the caret belongs -
+       stepping back through virtual space here would drop these carets a
+       column behind the ones that did have text to delete, and the set would
+       stop being a straight line. deleteByCut names no direction and only
+       ever takes what is selected, so it lands in the same place. */
+    if (padR > padL || !directional) return { start, end, text: '', pad: padL };
+
+    /* A bare caret has nothing selected, so Backspace has the empty columns
+       to come back through first; forward there is nothing to the right. */
+    const pad = c.pad || 0;
+    if (pad > 0) return { start, end, text: '', pad: backward ? pad - 1 : pad };
+    if (backward) {
+      start = word ? wordStep(text, start, -1)
+        : wholeLine ? lineStartOf(text, start)
+          : stepBack(text, start);
+    } else {
+      end = word ? wordStep(text, end, 1)
+        : wholeLine ? lineEndOf(text, end)
+          : stepForward(text, end);
+    }
+    return { start, end, text: '' };
+  });
+}
+
+/* Cut removes what is selected and nothing else. Reusing an insert of '' for
+   that would pad out the short lines the box only crossed in virtual space. */
+const clearEdits = () => multi.carets.map(c => {
+  const [start, end] = caretRange(c);
+  return { start, end, text: '', pad: start === end ? (c.padL || 0) : 0 };
+});
+
+const multiText = () => multi.carets.map(c => {
+  const [start, end] = caretRange(c);
+  return multi.ta.value.slice(start, end);
+}).join('\n');
+
+/* ---- moving the whole set ---- */
+
+function moveCarets(key, extend, byWord) {
+  const ta = multi.ta;
+  const text = ta.value;
+  const starts = textLineStarts(text);
+
+  const next = multi.carets.map(c => {
+    let head = c.h, goal = c.goal, pad = 0;
+    if (key === 'ArrowLeft' || key === 'ArrowRight') {
+      const back = key === 'ArrowLeft';
+      const [start, end] = caretRange(c);
+      if (!extend && start !== end) head = back ? start : end;
+      else if (byWord) head = wordStep(text, head, back ? -1 : 1);
+      else head = back ? stepBack(text, head) : stepForward(text, head);
+      goal = undefined;
+    } else if (key === 'Home' || key === 'End') {
+      head = key === 'Home' ? homeOf(text, head) : lineEndOf(text, head);
+      goal = undefined;
+    } else {
+      const row = displayRowAtStarts(starts, head);
+      const col = goal === undefined ? head - starts[row] + (c.pad || 0) : goal;
+      const to = key === 'ArrowUp' ? row - 1 : row + 1;
+      if (to >= 0 && to < starts.length) {
+        const [lineStart, lineEnd] = lineBounds(text, starts, to);
+        head = lineStart + Math.min(col, lineEnd - lineStart);
+        pad = Math.max(0, col - (lineEnd - lineStart));
+      }
+      goal = col;
+    }
+    return { a: extend ? c.a : head, h: head, goal, pad, padL: pad, padR: pad };
+  });
+
+  setCarets(ta, next, Math.min(multi.primary, next.length - 1));
+  settleCarets();
+}
+
+/* Ctrl+Alt+Up / Down. Grows the set from whichever end is being pushed, and
+   starts one from the ordinary caret when there is nothing to grow yet. */
+function addCaretVertically(dir) {
+  const ta = document.activeElement;
+  if (ta !== src && ta !== fmt) return false;
+  if (multi && multi.ta !== ta) exitMulti();
+
+  const text = ta.value;
+  const starts = textLineStarts(text);
+  const carets = multi
+    ? multi.carets.slice()
+    : [{ a: ta.selectionStart, h: ta.selectionEnd, goal: undefined }];
+
+  let edge = carets[0];
+  for (const c of carets) if (dir < 0 ? c.h < edge.h : c.h > edge.h) edge = c;
+
+  const row = displayRowAtStarts(starts, edge.h);
+  const to = row + dir;
+  if (to < 0 || to >= starts.length) return true;
+
+  const col = edge.goal === undefined ? edge.h - starts[row] + (edge.pad || 0) : edge.goal;
+  const [lineStart, lineEnd] = lineBounds(text, starts, to);
+  const at = lineStart + Math.min(col, lineEnd - lineStart);
+  const pad = Math.max(0, col - (lineEnd - lineStart));
+  setCarets(ta, carets.concat([{ a: at, h: at, goal: col, pad, padL: pad, padR: pad }]), carets.length);
+  return true;
+}
+
+/* ---- wiring ----
+
+   Registered before the single-caret handlers further down the file, so a set
+   that has claimed a key can stop it from being handled a second time. */
+
+const MULTI_MOVE_KEYS = ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', 'Home', 'End'];
+
+for (const pane of PANES) {
+  pane.ta.addEventListener('pointerdown', e => {
+    if (e.button !== 0) return;
+    if (!e.altKey) { exitMulti(); return; }
+
+    /* Alt is the whole gesture, so the browser's own drag-select has to go.
+       That also cancels the focus it would otherwise have given us. */
+    e.preventDefault();
+    if (document.activeElement !== pane.ta) pane.ta.focus();
+
+    /* Ctrl adds to what is already there. A single caret is not held as a set
+       - it is just the textarea's own selection - so that is what the first
+       added caret has to be built from, or the set could never be started. */
+    const additive = e.ctrlKey || e.metaKey;
+    const base = !additive ? []
+      : multi && multi.ta === pane.ta ? multi.carets.slice()
+        : [{ a: pane.ta.selectionStart, h: pane.ta.selectionEnd }];
+    if (!additive) exitMulti();
+    wordHighlightArmed = false;
+
+    boxDrag = {
+      pane, base, id: e.pointerId, raf: 0,
+      anchor: pointToRowCol(pane, e.clientX, e.clientY),
+      x: e.clientX, y: e.clientY,
+    };
+    /* Capture keeps a drag that leaves the pane reporting to it. A pointer
+       that is already gone by the time this runs cannot be captured, and the
+       drag simply ends at the next pointerup. */
+    try { pane.ta.setPointerCapture(e.pointerId); } catch { boxDrag.id = -1; }
+    updateBoxDrag();
+    boxDrag.raf = requestAnimationFrame(dragScroll);
+  });
+
+  pane.ta.addEventListener('pointermove', e => {
+    if (!boxDrag || boxDrag.pane !== pane) return;
+    e.preventDefault();
+    boxDrag.x = e.clientX;
+    boxDrag.y = e.clientY;
+    updateBoxDrag();
+  });
+
+  pane.ta.addEventListener('pointerup', endBoxDrag);
+  pane.ta.addEventListener('pointercancel', endBoxDrag);
+  pane.ta.addEventListener('lostpointercapture', endBoxDrag);
+
+  pane.ta.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.altKey && !e.shiftKey
+      && (e.key === 'ArrowUp' || e.key === 'ArrowDown')) {
+      if (!addCaretVertically(e.key === 'ArrowUp' ? -1 : 1)) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      return;
+    }
+    if (!multi || multi.ta !== pane.ta) return;
+
+    const claim = () => { e.preventDefault(); e.stopImmediatePropagation(); };
+    const plain = !e.ctrlKey && !e.metaKey && !e.altKey;
+
+    if (e.key === 'Escape') { claim(); exitMulti(true); return; }
+    if (e.key === 'Enter' && plain) {
+      claim();
+      applyMulti(enterEdits(), `${pane.tag}-multi`);
+      settleCarets();
+      return;
+    }
+    if (e.key === 'Tab' && plain && !e.shiftKey) {
+      claim();
+      applyMulti(insertEdits('  '), `${pane.tag}-multi`);
+      settleCarets();
+      return;
+    }
+    if (!e.altKey && MULTI_MOVE_KEYS.includes(e.key)) {
+      claim();
+      moveCarets(e.key, e.shiftKey, e.ctrlKey || e.metaKey);
+      return;
+    }
+    /* Anything that reaches for one big selection - select all, a page jump -
+       means the set is over. Let the browser have the key back. */
+    if (e.key === 'PageUp' || e.key === 'PageDown'
+      || ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === 'a')) {
+      exitMulti();
+    }
+  });
+
+  pane.ta.addEventListener('beforeinput', e => {
+    if (!multi || multi.ta !== pane.ta) return;
+    const type = e.inputType || '';
+
+    // undo, redo and composition each rewrite the text on their own terms
+    if (type.startsWith('history') || type.includes('omposition')) { exitMulti(); return; }
+
+    let edits = null;
+    if (type === 'insertText' || type === 'insertReplacementText') {
+      edits = insertEdits(e.data == null ? '' : e.data);
+    } else if (type === 'insertLineBreak' || type === 'insertParagraph') {
+      edits = enterEdits();
+    } else if (type.startsWith('delete')) {
+      edits = deleteEdits(type);
+    } else if (type === 'insertFromPaste' || type === 'insertFromDrop') {
+      edits = pasteEdits(e.dataTransfer ? e.dataTransfer.getData('text/plain') : '');
+    }
+    if (!edits) return;
+
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    applyMulti(edits, `${pane.tag}-multi`);
+    settleCarets();
+  });
+
+  pane.ta.addEventListener('compositionstart', () => {
+    if (multi && multi.ta === pane.ta) exitMulti(true);
+  });
+
+  pane.ta.addEventListener('paste', e => {
+    if (!multi || multi.ta !== pane.ta || !e.clipboardData) return;
+    e.preventDefault();
+    e.stopImmediatePropagation();
+    applyMulti(pasteEdits(e.clipboardData.getData('text/plain')), `${pane.tag}-multi`);
+    settleCarets();
+  });
+
+  /* One line per caret, so a column copy can be pasted straight back into a
+     set of the same size and land a line on each. */
+  for (const kind of ['copy', 'cut']) {
+    pane.ta.addEventListener(kind, e => {
+      if (!multi || multi.ta !== pane.ta || !e.clipboardData) return;
+      if (multi.carets.every(c => c.a === c.h)) return;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      e.clipboardData.setData('text/plain', multiText());
+      if (kind !== 'cut') return;
+      applyMulti(clearEdits(), `${pane.tag}-multi`);
+      settleCarets();
+    });
+  }
+
+  /* The set belongs to one pane; moving to the other one ends it. */
+  pane.ta.addEventListener('focus', () => {
+    if (multi && multi.ta !== pane.ta) exitMulti();
+  });
+}
+
+/* Capture normally keeps the pane hearing about the release, but a drag whose
+   pointer it never captured could otherwise be let go somewhere the pane never
+   hears about - and the auto-scroll would go on running with nothing left to
+   drive it. Ending on any release closes that off. */
+window.addEventListener('pointerup', endBoxDrag, true);
+window.addEventListener('pointercancel', endBoxDrag, true);
 
 /* ---- events ---- */
 
@@ -3086,6 +4044,7 @@ for (const ta of [src, fmt]) {
 }
 
 window.addEventListener('resize', () => {
+  cellWidths = new WeakMap();
   paintSrc();
   if (fmtDirty) {
     if (folded.size || hasFoldLayout()) paintFmtRawFolded(); else paintFmtRaw();
@@ -3141,6 +4100,7 @@ function scrollToLine(line, keepBottomSpace = false, offset = 0, lockBottom = fa
 }
 
 function toggleFoldAll() {
+  exitMulti();
   flushPendingEdit();
   if (fmtDirty) settleFmt();
 
@@ -3168,6 +4128,7 @@ function toggleFoldAll() {
 fmtEditor.addEventListener('pointerdown', e => {
   const tag = e.target.closest('[data-fold]');
   if (!tag) return;                       // scrolling/caret placement keeps the spacer
+  exitMulti();
   let at = Number(tag.dataset.fold);
   const target = (fmtSelectionMap.folds || []).find(fold => fold.line === at);
   const viewport = viewportAnchor();
@@ -3370,6 +4331,69 @@ for (const [ta, other] of [[src, fmtEditor], [fmt, srcEditor]]) {
 window.addEventListener('pointerup', () => {
   srcEditor.classList.remove('no-select');
   fmtEditor.classList.remove('no-select');
+});
+
+/* ---- settings popover: which line-start markers begin a comment ---- */
+
+const settingsButton = document.getElementById('settings');
+const settingsPop = document.getElementById('settingsPop');
+const settingsClose = document.getElementById('settingsClose');
+const settingsMarkers = document.getElementById('settingsMarkers');
+const settingsForm = document.getElementById('settingsAddForm');
+const settingsInput = document.getElementById('settingsMarkerInput');
+
+function renderCommentMarkers() {
+  settingsMarkers.innerHTML = commentMarkers.length
+    ? commentMarkers.map((m, i) =>
+      `<li><code>${esc(m)}</code><button type="button" class="settings-remove" data-i="${i}" title="Remove" aria-label="Remove marker ${esc(m)}">×</button></li>`).join('')
+    : '<li class="settings-empty">no markers</li>';
+}
+
+function applyCommentMarkers(list) {
+  commentMarkers = list;
+  try { localStorage.setItem(MARKERS_KEY, JSON.stringify(list)); } catch { /* storage may be unavailable */ }
+  tokenCache.clear();
+  parenScan = { text: null, parens: null };
+  renderCommentMarkers();
+  settleFmt();
+  fromSrc();
+}
+
+function openSettings() {
+  renderCommentMarkers();
+  settingsPop.hidden = false;
+  settingsButton.setAttribute('aria-expanded', 'true');
+  settingsInput.focus();
+}
+
+function closeSettings(refocus = false) {
+  if (settingsPop.hidden) return;
+  settingsPop.hidden = true;
+  settingsButton.setAttribute('aria-expanded', 'false');
+  if (refocus) settingsButton.focus();
+}
+
+settingsButton.addEventListener('click', () => (settingsPop.hidden ? openSettings() : closeSettings()));
+settingsClose.addEventListener('click', () => closeSettings(true));
+settingsMarkers.addEventListener('click', e => {
+  const btn = e.target.closest('.settings-remove');
+  if (!btn) return;
+  applyCommentMarkers(commentMarkers.filter((_, i) => i !== Number(btn.dataset.i)));
+  settingsInput.focus();
+});
+settingsForm.addEventListener('submit', e => {
+  e.preventDefault();
+  const m = settingsInput.value.trim();
+  settingsInput.value = '';
+  if (!m || commentMarkers.includes(m)) return;
+  applyCommentMarkers(commentMarkers.concat(m));
+});
+document.addEventListener('pointerdown', e => {
+  if (settingsPop.hidden || settingsPop.contains(e.target) || settingsButton.contains(e.target)) return;
+  closeSettings();
+});
+document.addEventListener('keydown', e => {
+  if (e.key === 'Escape' && !settingsPop.hidden) { e.preventDefault(); closeSettings(true); }
 });
 
 const saved = localStorage.getItem(KEY);
