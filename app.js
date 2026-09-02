@@ -1,5 +1,5 @@
-/* SQL Viewer - live bracket-depth formatter + highlighter. No build step, no deps.
-   node-sql-parser (loaded from CDN) is used for the live validity readout. */
+/* SQL Viewer - live bracket-depth formatter + highlighter. No build step.
+   node-sql-parser runs in validator-worker.js for the live validity readout. */
 
 /* ------------------------------------------------------------------ keywords */
 
@@ -849,11 +849,11 @@ function makeDiagnostic(sql, type, message, short, start, end, relatedStart, rel
   return d;
 }
 
-function structuralDiagnostics(sql) {
+function structuralDiagnostics(sql, tokens = tokensFor(sql)) {
   const stack = [];
   const found = [];
 
-  for (const tk of tokensFor(sql)) {
+  for (const tk of tokens) {
     if ((tk.t === 'str' || tk.t === 'qid') && !tk.closed) {
       const close = tk.quote === '[' ? ']' : tk.quote;
       const bracketedIdentifier = tk.t === 'qid' && tk.quote === '[';
@@ -920,8 +920,7 @@ function identifierTokenName(tk) {
    call, but it cannot tell whether name is one of the dialects we support.
    Do that schema-independent check here so typos do not get a false
    "Syntax OK" result. */
-function unknownFunctionDiagnostics(sql) {
-  const tokens = tokensFor(sql);
+function unknownFunctionDiagnostics(sql, tokens = tokensFor(sql)) {
   const found = [];
 
   for (let i = 0; i < tokens.length; i++) {
@@ -979,8 +978,8 @@ function offsetFromPosition(text, pos) {
   return clampOffset(text, at + column - 1);
 }
 
-function parserDiagnostic(sql, trimmed, err, prefix) {
-  const parserText = prefix + parserInput(trimmed);
+function parserDiagnostic(sql, trimmed, err, prefix, parseText = parserInput(trimmed)) {
+  const parserText = prefix + parseText;
   const loc = err && err.location && err.location.start;
   const parserAt = offsetFromPosition(parserText, loc);
   const trimmedAt = Math.max(0, sql.indexOf(trimmed));
@@ -1007,21 +1006,12 @@ function parserDiagnosticIsCovered(d, structural) {
 
 /* --------------------------------------------------------------- validity */
 
-let parser = null;
 const STATEMENT = /^(SELECT|INSERT|UPDATE|DELETE|WITH|CREATE|ALTER|DROP|TRUNCATE|EXPLAIN|SHOW|REPLACE)\b/i;
 const TAIL = /^(WHERE|ORDER|GROUP|HAVING|LIMIT|OFFSET|ON|USING|JOIN|LEFT|RIGHT|INNER|FULL|CROSS|NATURAL|UNION)\b/i;
 const AS_CLAUSE = 'SELECT * FROM __t ';
 const AS_PREDICATE = 'SELECT * FROM __t WHERE ';
-const LIVE_PARSE_MAX_CHARS = 8000;
-const LIVE_PARSE_MAX_TOKENS = 1600;
-const LIVE_PARSE_MAX_OR = 120;
-
-function getParser() {
-  if (parser) return parser;
-  if (typeof window.Parser !== 'function') return null;
-  parser = new window.Parser();
-  return parser;
-}
+const VALIDATION_DEBOUNCE_MS = 220;
+const VALIDATOR_WORKER_URL = 'validator-worker.js?v=unbounded-1';
 
 /* A paste may be a whole statement, a trailing clause, or - most often here -
    a bare boolean predicate with no WHERE in front of it. Try each shape. */
@@ -1031,53 +1021,19 @@ function candidates(sql) {
   return [[AS_PREDICATE, 'Syntax OK'], [AS_CLAUSE, 'Syntax OK'], ['', 'Syntax OK']];
 }
 
-function liveParseTooExpensive(sql) {
-  if (sql.length > LIVE_PARSE_MAX_CHARS) return true;
-  const tokens = tokensFor(sql);
-  if (tokens.length > LIVE_PARSE_MAX_TOKENS) return true;
-  let ors = 0;
-  for (const tk of tokens) {
-    if (tk.t === 'word' && tk.v.toUpperCase() === 'OR' && ++ors > LIVE_PARSE_MAX_OR) return true;
-  }
-  return false;
-}
-
-function validate(sql) {
+function prepareValidation(sql) {
   const trimmed = sql.trim();
-  if (!trimmed) return { state: '', text: '', diagnostics: [] };
-  const structural = structuralDiagnostics(sql);
-  const unknownFunctions = unknownFunctionDiagnostics(sql);
+  if (!trimmed) return { result: { state: '', text: '', diagnostics: [] } };
+  /* Tokenize once for the two local checks. These checks are linear and stay on
+     the main thread so obvious errors appear before the full parser is loaded. */
+  const tokens = tokensFor(sql);
+  const structural = structuralDiagnostics(sql, tokens);
+  const unknownFunctions = unknownFunctionDiagnostics(sql, tokens);
   const preflight = structural.concat(unknownFunctions)
     .sort((a, b) => a.start - b.start || (a.relatedStart || 0) - (b.relatedStart || 0));
-  if (preflight.length) return { state: 'bad', text: '', diagnostics: preflight };
-  if (liveParseTooExpensive(trimmed)) {
-    return { state: '', text: 'syntax check deferred for large SQL', diagnostics: [] };
-  }
-  const p = getParser();
-  if (!p) {
-    return { state: '', text: 'syntax check unavailable', diagnostics: [] };
-  }
-
-  let first = null;
+  if (preflight.length) return { result: { state: 'bad', text: '', diagnostics: preflight } };
   const parseText = parserInput(trimmed);
-  for (const [prefix, label] of candidates(trimmed)) {
-    try {
-      p.astify(prefix + parseText, { database: 'MySQL' });
-      return { state: 'ok', text: label, diagnostics: [] };
-    } catch (err) {
-      if (!first) first = { err, prefix };
-    }
-  }
-
-  const parser = first ? parserDiagnostic(sql, trimmed, first.err, first.prefix) : null;
-  const all = preflight.slice();
-  if (parser && !parserDiagnosticIsCovered(parser, structural)) all.push(parser);
-  all.sort((a, b) => a.start - b.start || (a.relatedStart || 0) - (b.relatedStart || 0));
-  if (!all.length) {
-    const raw = String((first && first.err && first.err.message) || 'parse error').split('\n')[0];
-    all.push(makeDiagnostic(sql, 'parser', `could not parse SQL: ${raw.slice(0, 120)}`, 'Could not parse SQL', sql.length, sql.length));
-  }
-  return { state: 'bad', text: '', diagnostics: all };
+  return { trimmed, parseText, candidates: candidates(trimmed), structural };
 }
 
 /* ------------------------------------------------------------------- wiring */
@@ -1113,6 +1069,7 @@ const KEY = 'sqlviewer.input';
 let frame = 0, timer = 0, saveTimer = 0, foldedRenderFrame = 0, fastEditFrame = 0;
 let selectionSyncFrame = 0, diagnosticIndicatorFrame = 0;
 let editPaintTimer = 0, validationVersion = 0;
+let validationWorker = null;
 let doc = { lines: [], folds: new Map() };
 const folded = new Set();
 let rowLine = [];              // rendered row -> its line number in doc.lines
@@ -1236,21 +1193,96 @@ function applyValidation(result) {
   paintDiagnosticState();
 }
 
+function stopValidationWorker() {
+  if (!validationWorker) return;
+  validationWorker.terminate();
+  validationWorker = null;
+}
+
+function parserValidationResult(sql, prepared, message) {
+  if (message.unavailable) {
+    return { state: '', text: 'syntax check unavailable', diagnostics: [] };
+  }
+  if (message.ok) {
+    return { state: 'ok', text: message.label || 'Syntax OK', diagnostics: [] };
+  }
+
+  const diagnostic = parserDiagnostic(
+    sql,
+    prepared.trimmed,
+    message.error,
+    message.prefix || '',
+    prepared.parseText,
+  );
+  const all = [];
+  if (diagnostic && !parserDiagnosticIsCovered(diagnostic, prepared.structural)) all.push(diagnostic);
+  if (!all.length) {
+    const raw = String((message.error && message.error.message) || 'parse error').split('\n')[0];
+    all.push(makeDiagnostic(
+      sql,
+      'parser',
+      `could not parse SQL: ${raw.slice(0, 120)}`,
+      'Could not parse SQL',
+      sql.length,
+      sql.length,
+    ));
+  }
+  return { state: 'bad', text: '', diagnostics: all };
+}
+
+function runValidation(sql, version) {
+  if (version !== validationVersion || sql !== src.value) return;
+  const prepared = prepareValidation(sql);
+  if (prepared.result) {
+    applyValidation(prepared.result);
+    return;
+  }
+  if (typeof Worker !== 'function') {
+    applyValidation({ state: '', text: 'syntax check unavailable', diagnostics: [] });
+    return;
+  }
+
+  let worker;
+  try {
+    worker = new Worker(VALIDATOR_WORKER_URL);
+  } catch {
+    applyValidation({ state: '', text: 'syntax check unavailable', diagnostics: [] });
+    return;
+  }
+  validationWorker = worker;
+
+  const finish = result => {
+    if (validationWorker !== worker) return;
+    stopValidationWorker();
+    if (version !== validationVersion || sql !== src.value) return;
+    applyValidation(result);
+  };
+  worker.onmessage = event => {
+    const message = event.data || {};
+    if (message.version !== version) return;
+    finish(parserValidationResult(sql, prepared, message));
+  };
+  worker.onerror = () => {
+    finish({ state: '', text: 'syntax check unavailable', diagnostics: [] });
+  };
+  worker.postMessage({
+    version,
+    parseText: prepared.parseText,
+    candidates: prepared.candidates,
+  });
+}
+
 function scheduleValidate(sql) {
   const version = ++validationVersion;
   clearTimeout(timer);
-  setStatus('', 'checking...');
+  stopValidationWorker();
+  setStatus('checking', 'checking...');
   /* Undo/redo can repair the SQL without passing through the native input
      event. Clear the previous diagnostic immediately so an old parser error
      (for example, unexpected "d") cannot remain visible while the restored
      value is being checked. */
   clearDiagnostics();
-  timer = setTimeout(() => {
-    if (version !== validationVersion || sql !== src.value) return;
-    const r = validate(sql);
-    if (version !== validationVersion || sql !== src.value) return;
-    applyValidation(r);
-  }, 220);
+  timer = setTimeout(() => runValidation(sql, version), VALIDATION_DEBOUNCE_MS);
 }
 
 function showDiagnostic(index) {
@@ -1719,8 +1751,7 @@ function indexOfAnchorEnd(text, k) {
 /* The formatted pane's caret as an anchor into the fully expanded text, and
    back again - so a collapsed pane still agrees with the source on where you
    are. Offsets hidden inside a fold resolve to the nearest visible one. */
-function fmtAnchor() {
-  const at = fmt.selectionStart;
+function fmtAnchor(at = fmt.selectionStart) {
   if (!folded.size) return anchorOf(fmt.value, at);
   return foldAnchors[Math.min(at, foldAnchors.length - 1)] || 0;
 }
@@ -1850,6 +1881,16 @@ function paintCaretLine(mirrorEl, editorEl, curEl, text, idx, on) {
   curEl.style.top = `${rowTop - editorEl.getBoundingClientRect().top + wrapped * lh}px`;
 }
 
+/* While a selection is being extended - dragging with the mouse or holding
+   shift - only one end moves. Dragging upwards moves selectionStart, but
+   dragging downwards leaves it pinned at the anchor and moves selectionEnd,
+   so reading selectionStart froze the other pane until the drag ended.
+   Follow whichever end the caret is actually on. A direction of 'none' comes
+   from programmatic ranges, where the start is still the caret. */
+function focusOffset(ta) {
+  return ta.selectionDirection === 'forward' ? ta.selectionEnd : ta.selectionStart;
+}
+
 function syncCarets(navigate = false) {
   const onSrc = document.activeElement === src;
   const onFmt = document.activeElement === fmt;
@@ -1863,9 +1904,10 @@ function syncCarets(navigate = false) {
   }
 
   // anchors are always counted against the fully expanded text
-  const anchor = onSrc ? anchorOf(src.value, src.selectionStart) : fmtAnchor();
-  const atSrc = onSrc ? src.selectionStart : indexOfAnchor(src.value, anchor);
-  const atFmt = onSrc ? fmtIndexOf(anchor) : fmt.selectionStart;
+  const from = focusOffset(onSrc ? src : fmt);
+  const anchor = onSrc ? anchorOf(src.value, from) : fmtAnchor(from);
+  const atSrc = onSrc ? from : indexOfAnchor(src.value, anchor);
+  const atFmt = onSrc ? fmtIndexOf(anchor) : from;
 
   if (navigate) {
     if (onSrc) {
@@ -4418,11 +4460,6 @@ historyCurrent = captureHistoryState();
 window.addEventListener('pagehide', () => {
   clearTimeout(saveTimer);
   saveTimer = 0;
+  stopValidationWorker();
   localStorage.setItem(KEY, src.value);
-});
-
-/* the parser arrives async from the CDN; re-check once it lands */
-window.addEventListener('load', () => {
-  const r = validate(src.value);
-  applyValidation(r);
 });

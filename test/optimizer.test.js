@@ -3,7 +3,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 
-const { lex, optimiseSql } = require('../optimizer.js');
+const { lex, optimiseSql, layoutOnOriginal } = require('../optimizer.js');
 
 const CLAUSE_STOP = new Set([
   'GROUP', 'ORDER', 'HAVING', 'LIMIT', 'OFFSET', 'UNION', 'INTERSECT', 'EXCEPT',
@@ -611,4 +611,70 @@ test('emits one positive and one negative prodid group across branches', () => {
   assert.match(result.optimizedOneLine, /Prodid IN \(1, 2, 7, 8\)/i);
   assert.match(result.optimizedOneLine, /Prodid NOT IN \(3, 4, 5, 6\)/i);
   assert.equal((result.optimizedOneLine.match(/(?:\bprodid\b|\[prodid\])/gi) || []).length, 2);
+});
+
+/* ------------------------------------------------------- layout on original */
+
+/* What the modal does: optimise, then lay the new tokens back over the text
+   that was pasted in, so untouched lines stay exactly as they were written. */
+function layout(sql, options = {}) {
+  const trimmed = sql.trim();
+  const result = optimiseSql(trimmed, options);
+  assert.equal(result.error, undefined);
+  return layoutOnOriginal(trimmed, lex(trimmed), codeTokens(result.optimizedOneLine));
+}
+
+function countOf(text, pattern) {
+  return (text.match(pattern) || []).length;
+}
+
+test('keeps the original lines of a long predicate it barely changed', () => {
+  /* Well past the token count that used to force the coarse diff. Only the
+     redundant parentheses around each branch go, so every line, blank line
+     and comment has to come through. */
+  const lines = [];
+  for (let i = 0; i < 220; i++) {
+    if (i && i % 25 === 0) lines.push('', `-- section ${i / 25}`);
+    lines.push(`([Level2] IN ("cat ${i}") AND [Prodcode] IN (${i}, ${i + 1}, ${i + 2}))${i < 219 ? ' OR' : ''}`);
+  }
+  const sql = lines.join('\n');
+  assert.ok(codeTokens(sql).length > 3000, 'input should exceed the old diff cap');
+
+  const laid = layout(sql);
+  assert.equal(laid.addedCount, 0);
+  assert.ok(laid.removedCount > 0, 'the redundant parentheses should still be struck');
+  assert.equal(laid.text.split('\n').length, sql.split('\n').length);
+  assert.equal(countOf(laid.text, /^-- section \d$/gm), countOf(sql, /^-- section \d$/gm));
+  assert.equal(countOf(laid.text, /^$/gm), countOf(sql, /^$/gm));
+  assert.equal(countOf(laid.text, /[()]/g), countOf(sql, /[()]/g) - laid.removedCount);
+});
+
+test('lifts a comment out of the expression that swallowed its branch', () => {
+  const laid = layout(`[a] IN (1) OR
+-- fruit
+[a] IN (2) OR
+[a] IN (3) OR
+-- veg
+[b] IN (9)`);
+
+  /* "fruit" labelled a branch that is now part of the list on the line above.
+     Left where it falls due it would sit between "1" and ", 2", splitting the
+     IN list, so it belongs at the top of that line instead. */
+  assert.equal(laid.text, `-- fruit
+[a] IN (1, 2, 3) OR
+-- veg
+[b] IN (9)`);
+});
+
+test('leaves a comment where it was when the rewrite starts on a fresh line', () => {
+  const laid = layout(`[a] IN (1, 2, 3) OR
+-- redundant
+[a] IN (2) OR
+-- kept
+[b] IN (9)`);
+
+  assert.equal(laid.text, `[a] IN (1, 2, 3) OR
+-- redundant
+-- kept
+[b] IN (9)`);
 });

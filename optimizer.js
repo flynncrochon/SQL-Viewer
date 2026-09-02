@@ -1435,27 +1435,43 @@
      operators, or predicates. Token boundaries give repeated IDs and SQL
      punctuation a stable place to match, while whitespace stays invisible to
      the comparison. */
+  /* Myers costs O(D * (N + M)) time and O(D^2) memory in the edit distance D,
+     not in the length of the input, so a long predicate the optimiser barely
+     touched is cheap to diff exactly. Budgeting on N * M instead gave up on
+     precisely those - a 150-line predicate with two dozen parentheses removed
+     fell back to the coarse diff and lost every line of the original layout.
+     The budget shrinks on very long inputs so the snake walks stay bounded. */
+  function distanceBudget(max) {
+    return Math.min(max, Math.max(64, Math.min(3000, Math.floor(20000000 / max))));
+  }
+
   function diffSequence(oldItems, newItems) {
     if (!oldItems.length || !newItems.length) return coarseSequence(oldItems, newItems);
-    if (oldItems.length * newItems.length > 8000000 || oldItems.length + newItems.length > 6000) {
-      return coarseSequence(oldItems, newItems);
-    }
 
     const max = oldItems.length + newItems.length;
+    const budget = distanceBudget(max);
+    /* Frontier keyed by diagonal, -1 for "not reached yet". A typed array
+       rather than a Map because every pass snapshots the frontier for the
+       backtrack, and the per-entry map overhead is what made a deep search
+       unaffordable. */
+    const offset = max + 1;
+    const frontier = new Int32Array(2 * max + 3).fill(-1);
+    frontier[1 + offset] = 0;
     const trace = [];
-    let frontier = new Map([[1, 0]]);
 
-    for (let distance = 0; distance <= max; distance++) {
-      trace.push(new Map(frontier));
+    for (let distance = 0; distance <= budget; distance++) {
+      /* Snapshot only the diagonals the backtrack can read at this depth:
+         [-distance, distance], plus the seeded diagonal 1 either side. */
+      trace.push(frontier.slice(offset - distance - 1, offset + distance + 2));
       for (let diagonal = -distance; diagonal <= distance; diagonal += 2) {
-        const down = frontier.get(diagonal + 1) ?? -1;
-        const right = frontier.get(diagonal - 1) ?? -1;
+        const down = frontier[diagonal + 1 + offset];
+        const right = frontier[diagonal - 1 + offset];
         let x;
         if (diagonal === -distance || (diagonal !== distance && down > right)) x = down;
         else x = right + 1;
         let y = x - diagonal;
         while (x < oldItems.length && y < newItems.length && oldItems[x] === newItems[y]) { x++; y++; }
-        frontier.set(diagonal, x);
+        frontier[diagonal + offset] = x;
         if (x >= oldItems.length && y >= newItems.length) {
           return backtrackSequence(trace, oldItems, newItems);
         }
@@ -1471,13 +1487,16 @@
 
     for (let distance = trace.length - 1; distance > 0; distance--) {
       const frontier = trace[distance];
+      /* Diagonals outside the snapshot were never reached, same as a missing
+         map key was. */
+      const reached = k => (k < -distance - 1 || k > distance + 1 ? -1 : frontier[k + distance + 1]);
       const diagonal = x - y;
-      const down = frontier.get(diagonal + 1) ?? -1;
-      const right = frontier.get(diagonal - 1) ?? -1;
+      const down = reached(diagonal + 1);
+      const right = reached(diagonal - 1);
       const previousDiagonal = diagonal === -distance || (diagonal !== distance && down > right)
         ? diagonal + 1
         : diagonal - 1;
-      const previousX = frontier.get(previousDiagonal) ?? 0;
+      const previousX = Math.max(0, reached(previousDiagonal));
       const previousY = previousX - previousDiagonal;
 
       while (x > previousX && y > previousY) {
@@ -1565,26 +1584,67 @@
     }
 
     const removedStarts = new Set();
-    const addedStarts = new Set();
+    let addedStarts = new Set();
     let removedCount = 0, addedCount = 0;
     let out = '';
     let prevOut = null;          // last token written, for spacing
     let prevKeptEnd = 0;         // offset in oldText just after the last kept token
-    let region = { changed: false, comments: [], adds: [], dels: 0 };
+    let outLineStart = 0;        // offset in out where the line being written began
+    let region = { changed: false, comments: [], adds: [], dels: 0, runWs: null };
     let codeIndex = 0;
 
-    const lineIndent = ws => ws.slice(ws.lastIndexOf('\n'));      // "\n" + indentation
+    /* Everything reaches out through here so outLineStart keeps up; a hoisted
+       comment has to know where the line being written began. */
+    const write = chunk => {
+      const nl = chunk.lastIndexOf('\n');
+      if (nl >= 0) outLineStart = out.length + nl + 1;
+      out += chunk;
+    };
+
+    /* "\n" + indentation. Blank lines the author left between branches are
+       part of the layout, so they survive a rewritten run too. */
+    const lineIndent = ws => {
+      const first = ws.indexOf('\n');
+      return first < 0 ? ws : ws.slice(first).replace(/[ \t\r]+(?=\n)/g, '');
+    };
     const isLineComment = t => !t.value.startsWith('/*');
 
+    /* The branch a comment labelled can be folded into the line above it, and
+       then the point where the comment falls due is halfway through an
+       expression - inside the very IN list that swallowed it. Lift it to the
+       top of that line instead, where it still reads as a label for the code
+       it describes. */
+    const hoistComments = comments => {
+      const indent = (out.slice(outLineStart).match(/^[ \t]*/) || [''])[0];
+      const text = comments.map(({ t }) => indent + t.value).join('\n') + '\n';
+      out = out.slice(0, outLineStart) + text + out.slice(outLineStart);
+      const shifted = new Set();
+      addedStarts.forEach(at => shifted.add(at >= outLineStart ? at + text.length : at));
+      addedStarts = shifted;
+      outLineStart += text.length;
+    };
+
     const emitRegion = (next, wsBefore) => {
-      const leadMatch = prevOut ? oldText.slice(prevKeptEnd).match(/^[ \t\r]*\n[ \t]*/) : null;
+      const leadMatch = prevOut ? oldText.slice(prevKeptEnd).match(/^[ \t\r]*\n[ \t\r\n]*/) : null;
       const lead = leadMatch ? lineIndent(leadMatch[0]) : '';
+      /* Where the rewritten code would start if the region carried no
+         comments: a fresh line means they still sit at a boundary and stay
+         put, a continuation means they would land mid-expression. */
+      const firstCodeSep = !prevOut ? ''
+        : region.adds.length ? (lead && !region.dels ? lead : '')
+        : next ? (/\n/.test(wsBefore) ? lineIndent(wsBefore) : lead)
+        : '';
+      const hoist = Boolean(region.comments.length && prevOut && !/\n/.test(firstCodeSep));
+      if (hoist) hoistComments(region.comments);
+
       let needNl = false;
-      for (const { t, ws } of region.comments) {
-        const sep = !prevOut ? '' : /\n/.test(ws) ? lineIndent(ws) : needNl ? '\n' : ' ';
-        out += sep + t.value;
-        prevOut = t;
-        needNl = isLineComment(t);
+      if (!hoist) {
+        for (const { t, ws } of region.comments) {
+          const sep = !prevOut ? '' : /\n/.test(ws) ? lineIndent(ws) : needNl ? '\n' : ' ';
+          write(sep + t.value);
+          prevOut = t;
+          needNl = isLineComment(t);
+        }
       }
       let first = true;
       for (const tok of region.adds) {
@@ -1595,7 +1655,7 @@
         else sep = needsSpace(prevOut, tok) ? ' ' : '';
         addedStarts.add(out.length + sep.length);
         addedCount += tok.value.length;
-        out += sep + tok.value;
+        write(sep + tok.value);
         prevOut = tok;
         needNl = false;
         first = false;
@@ -1603,13 +1663,16 @@
       if (next) {
         let sep = '';
         if (!prevOut) sep = '';
-        else if (needNl) sep = /\n/.test(wsBefore) ? lineIndent(wsBefore) : '\n';
+        else if (needNl) {
+          const gap = /\n/.test(wsBefore) ? wsBefore : region.runWs;
+          sep = gap ? lineIndent(gap) : '\n';
+        }
         else if (/\n/.test(wsBefore)) sep = lineIndent(wsBefore);
         else if (lead && !region.adds.length) sep = lead;
         else sep = needsSpace(prevOut, next) ? ' ' : '';
-        out += sep;
+        write(sep);
       }
-      region = { changed: false, comments: [], adds: [], dels: 0 };
+      region = { changed: false, comments: [], adds: [], dels: 0, runWs: null };
     };
 
     for (let k = 0; k < oldTokens.length; k++) {
@@ -1622,23 +1685,27 @@
       if (st === 'del') {
         region.changed = true;
         region.dels++;
+        /* The line break before a struck token is still part of the author's
+           layout: it is the only record of a blank line that sat between a
+           comment block and the branch below it. */
+        if (/\n/.test(wsBefore)) region.runWs = wsBefore;
         removedStarts.add(t.start);
         removedCount += t.value.length;
         continue;
       }
       if (!region.changed) {
-        out += oldText.slice(prevKeptEnd, t.start);        // untouched: verbatim
+        write(oldText.slice(prevKeptEnd, t.start));        // untouched: verbatim
         region.comments = [];
       } else {
         emitRegion(t, wsBefore);
       }
-      out += t.value;
+      write(t.value);
       prevOut = t;
       prevKeptEnd = t.end;
     }
     const tailAdds = addsBefore.get(aCode.length);
     if (tailAdds) { region.adds.push(...tailAdds); region.changed = true; }
-    if (!region.changed) out += oldText.slice(prevKeptEnd);
+    if (!region.changed) write(oldText.slice(prevKeptEnd));
     else emitRegion(null, '');
 
     return { text: out, removedStarts, addedStarts, removedCount, addedCount };
