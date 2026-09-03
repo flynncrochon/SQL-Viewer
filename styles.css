@@ -389,10 +389,11 @@ body{
 .diag-related{background:#ffd70024!important;box-shadow:0 0 0 1px #ffd700aa;border-radius:2px}
 
 /* ---- scrollbars ---- */
-*::-webkit-scrollbar{width:14px;height:14px}
-*::-webkit-scrollbar-track{background:transparent}
-*::-webkit-scrollbar-thumb{background:#79797966;border:3px solid transparent;background-clip:content-box}
-*::-webkit-scrollbar-thumb:hover{background:#646464b3;background-clip:content-box}
+*::-webkit-scrollbar{width:14px;height:14px;cursor:default}
+*::-webkit-scrollbar-track{background:transparent;cursor:default}
+*::-webkit-scrollbar-thumb{background:#79797966;border:3px solid transparent;background-clip:content-box;cursor:default}
+*::-webkit-scrollbar-thumb:hover{background:#646464b3;background-clip:content-box;cursor:default}
+*::-webkit-scrollbar-button,*::-webkit-scrollbar-corner{cursor:default}
 
 @media (max-width:900px){
   .panes{grid-template-columns:1fr;grid-template-rows:1fr 1fr}
