@@ -1482,7 +1482,7 @@ function paintDiagnosticIndicator(mirrorEl, editorEl, lineEl, labelEl, text, vie
   lineEl.style.top = `${top}px`;
   labelEl.textContent = d.short;
   labelEl.style.display = 'block';
-  labelEl.style.top = `${top + 2}px`;
+  labelEl.style.top = `${top}px`;
 }
 
 /* The diagnostic overlays sit above the scrolling mirror, so their positions

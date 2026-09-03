@@ -8,21 +8,46 @@
     'RETURNING', 'WINDOW', 'QUALIFY', 'FETCH', 'FOR', 'OPTION'
   ]);
   const COMPARATORS = new Set(['=', '!=', '<>', '<=>', '<', '<=', '>', '>=']);
-  const OPS2 = ['<=>', '<=', '>=', '<>', '!=', '||', '&&', '::', ':=', '->', '=>', '<<', '>>'];
-  const OPS3 = ['<=>'];
+  const OPS2 = new Set(['<=>', '<=', '>=', '<>', '!=', '||', '&&', '::', ':=', '->', '=>', '<<', '>>']);
+  const OPS3 = new Set(['<=>']);
+  const SPACE_BEFORE_PAREN = new Set(['IN', 'EXISTS', 'WHERE', 'NOT', 'AND', 'OR', 'ON', 'FROM', 'SELECT', 'VALUES', 'AS', 'CASE']);
+  const LITERAL_WORDS = new Set(['TRUE', 'FALSE', 'NULL']);
+  /* OR, AND, END, CASE, BETWEEN - the only words readAtom reacts to. */
+  const ATOM_KEYWORD_LENGTHS = new Set([2, 3, 4, 7]);
 
   /* --------------------------------------------------------------- lexer */
 
-  function isWordStart(c) {
-    if (!c) return false;
-    const code = c.charCodeAt(0);
-    return /[A-Za-z_@$]/.test(c) || code > 127;
+  /* Character classes as code comparisons. The lexer asks these questions
+     once per character of the statement, and a regular expression per
+     character dominated lexing of the long single-line SQL this viewer is
+     built for. */
+  function isWordStartCode(code) {
+    return (code >= 65 && code <= 90) || (code >= 97 && code <= 122)
+      || code === 95 /* _ */ || code === 64 /* @ */ || code === 36 /* $ */
+      || code > 127;
   }
 
-  function isWordChar(c) {
-    if (!c) return false;
-    const code = c.charCodeAt(0);
-    return /[A-Za-z0-9_@$#]/.test(c) || code > 127;
+  function isWordCharCode(code) {
+    return (code >= 65 && code <= 90) || (code >= 97 && code <= 122)
+      || (code >= 48 && code <= 57)
+      || code === 95 || code === 64 || code === 36 || code === 35 /* # */
+      || code > 127;
+  }
+
+  /* Exactly the set JavaScript's \s matches, so the lexer skips what it did
+     when this was a /\s/ test per character. */
+  function isSpaceCode(code) {
+    if (code === 32 || (code >= 9 && code <= 13)) return true;
+    if (code <= 127) return false;
+    return code === 0xa0 || code === 0x1680 || (code >= 0x2000 && code <= 0x200a)
+      || code === 0x2028 || code === 0x2029 || code === 0x202f || code === 0x205f
+      || code === 0x3000 || code === 0xfeff;
+  }
+
+  function isDigitCode(code) { return code >= 48 && code <= 57; }
+
+  function isHexCode(code) {
+    return (code >= 48 && code <= 57) || (code >= 97 && code <= 102) || (code >= 65 && code <= 70);
   }
 
   function pushToken(out, type, value, start, end) {
@@ -34,32 +59,56 @@
      Node tests) the lexer keeps the historic "#" anywhere behaviour. */
   let lineCommentMarkers = null;
 
-  function lineCommentStart(sql, i) {
+  /* `blank` is the lexer's running answer to "is everything between the last
+     newline and here a space, tab or carriage return?". It used to be
+     rediscovered by walking backwards from each character in turn, which is
+     work the lexer had already done on its way forward. */
+  function lineCommentStart(sql, i, blank) {
     if (lineCommentMarkers === null) return sql[i] === '#';
-    if (!lineCommentMarkers.length) return false;
-    for (let j = i - 1; j >= 0; j--) {
-      const ch = sql[j];
-      if (ch === '\n') break;
+    if (!blank || !lineCommentMarkers.length) return false;
+    for (let j = 0; j < lineCommentMarkers.length; j++) {
+      if (sql.startsWith(lineCommentMarkers[j], i)) return true;
+    }
+    return false;
+  }
+
+  /* Only ' ', '\t' and '\r' keep a line blank; every other character ends
+     the run exactly as the old backward scan did. */
+  function blankAfter(text) {
+    const newline = text.lastIndexOf('\n');
+    if (newline < 0) return false;
+    for (let i = newline + 1; i < text.length; i++) {
+      const ch = text[i];
       if (ch !== ' ' && ch !== '\t' && ch !== '\r') return false;
     }
-    return lineCommentMarkers.some(m => sql.startsWith(m, i));
+    return true;
   }
 
   function lex(sql) {
     const out = [];
+    const length = sql.length;
     let i = 0;
+    let blank = true;
 
-    while (i < sql.length) {
+    while (i < length) {
+      const code = sql.charCodeAt(i);
+
+      if (isSpaceCode(code)) {
+        if (code === 10) blank = true;
+        else if (code !== 32 && code !== 9 && code !== 13) blank = false;
+        i++;
+        continue;
+      }
+
       const c = sql[i];
 
-      if (/\s/.test(c)) { i++; continue; }
-
-      if ((c === '-' && sql[i + 1] === '-') || lineCommentStart(sql, i)) {
+      if ((code === 45 && sql.charCodeAt(i + 1) === 45) || lineCommentStart(sql, i, blank)) {
         const start = i;
         let end = sql.indexOf('\n', i);
         if (end < 0) end = sql.length;
         pushToken(out, 'comment', sql.slice(start, end), start, end);
         i = end;
+        blank = false;
         continue;
       }
 
@@ -67,16 +116,20 @@
         const start = i;
         let end = sql.indexOf('*/', i + 2);
         end = end < 0 ? sql.length : end + 2;
-        pushToken(out, 'comment', sql.slice(start, end), start, end);
+        const text = sql.slice(start, end);
+        pushToken(out, 'comment', text, start, end);
         i = end;
+        blank = blankAfter(text);
         continue;
       }
+
+      blank = false;
 
       if (c === "'" || c === '"' || c === '`' || c === '[') {
         const start = i;
         const close = c === '[' ? ']' : c;
         i++;
-        while (i < sql.length) {
+        while (i < length) {
           if (sql[i] === '\\' && c !== '`' && c !== '[') { i += 2; continue; }
           if (sql[i] === close) {
             if (sql[i + 1] === close && c !== '[') { i += 2; continue; }
@@ -85,23 +138,29 @@
           }
           i++;
         }
-        pushToken(out, c === '`' || c === '[' ? 'qid' : 'str', sql.slice(start, i), start, i);
+        const text = sql.slice(start, i);
+        pushToken(out, c === '`' || c === '[' ? 'qid' : 'str', text, start, i);
+        if (text.indexOf('\n') >= 0) blank = blankAfter(text);
         continue;
       }
 
-      if (/[0-9]/.test(c) || (c === '.' && /[0-9]/.test(sql[i + 1] || ''))) {
+      if (isDigitCode(code) || (code === 46 && isDigitCode(sql.charCodeAt(i + 1)))) {
         const start = i;
-        if (c === '0' && (sql[i + 1] === 'x' || sql[i + 1] === 'X')) {
+        if (code === 48 && (sql[i + 1] === 'x' || sql[i + 1] === 'X')) {
           i += 2;
-          while (/[0-9a-fA-F]/.test(sql[i] || '')) i++;
+          while (isHexCode(sql.charCodeAt(i))) i++;
         } else {
-          while (/[0-9.]/.test(sql[i] || '')) i++;
+          for (;;) {
+            const digit = sql.charCodeAt(i);
+            if (!isDigitCode(digit) && digit !== 46) break;
+            i++;
+          }
           if (sql[i] === 'e' || sql[i] === 'E') {
             let j = i + 1;
             if (sql[j] === '+' || sql[j] === '-') j++;
-            if (/[0-9]/.test(sql[j] || '')) {
+            if (isDigitCode(sql.charCodeAt(j))) {
               i = j + 1;
-              while (/[0-9]/.test(sql[i] || '')) i++;
+              while (isDigitCode(sql.charCodeAt(i))) i++;
             }
           }
         }
@@ -109,9 +168,9 @@
         continue;
       }
 
-      if (isWordStart(c)) {
+      if (isWordStartCode(code)) {
         const start = i++;
-        while (isWordChar(sql[i])) i++;
+        while (isWordCharCode(sql.charCodeAt(i))) i++;
         pushToken(out, 'word', sql.slice(start, i), start, i);
         continue;
       }
@@ -121,16 +180,35 @@
       if (c === ';') { pushToken(out, 'semi', c, i, i + 1); i++; continue; }
 
       const three = sql.slice(i, i + 3), two = sql.slice(i, i + 2);
-      if (OPS3.includes(three)) { pushToken(out, 'op', three, i, i + 3); i += 3; continue; }
-      if (OPS2.includes(two)) { pushToken(out, 'op', two, i, i + 2); i += 2; continue; }
+      if (OPS3.has(three)) { pushToken(out, 'op', three, i, i + 3); i += 3; continue; }
+      if (OPS2.has(two)) { pushToken(out, 'op', two, i, i + 2); i += 2; continue; }
       pushToken(out, 'op', c, i, i + 1);
       i++;
     }
     return out;
   }
 
+  /* ------------------------------------------------------------- caches
+
+     The optimiser walks the same nodes many times over: once per fixed-point
+     pass, and O(n^2) times inside the implication scans that remove covered
+     branches. Nothing here mutates a node, a token or a parsed constraint
+     once it exists - every rewrite builds fresh objects - so each derived
+     value is memoised against the object it came from, and the WeakMaps are
+     collected along with the run's own AST. */
+  const signatureCache = new WeakMap();
+  const tokenKeyCache = new WeakMap();
+  const constraintCache = new WeakMap();
+  const factsCache = new WeakMap();
+  const costCache = new WeakMap();
+  const bucketSetCache = new WeakMap();
+
+  /* Comments are rare, so the common answer is the caller's own array. */
   function significant(tokens) {
-    return tokens.filter(t => t.type !== 'comment');
+    for (let i = 0; i < tokens.length; i++) {
+      if (tokens[i].type === 'comment') return tokens.filter(t => t.type !== 'comment');
+    }
+    return tokens;
   }
 
   /* SQL identifiers are normally case-insensitive. Keep the original token
@@ -159,11 +237,19 @@
   }
 
   function tokenKey(tokens) {
-    return significant(tokens).map(t => {
-      if (t.type === 'qid') return `word:${identifierName(t).toUpperCase()}`;
-      if (t.type === 'str') return `str:${stringLiteralName(t.value).toUpperCase()}`;
-      return `${t.type}:${canonicalToken(t)}`;
-    }).join('|');
+    const cached = tokenKeyCache.get(tokens);
+    if (cached !== undefined) return cached;
+    const list = significant(tokens);
+    let key = '';
+    for (let i = 0; i < list.length; i++) {
+      const t = list[i];
+      if (i) key += '|';
+      if (t.type === 'qid') key += 'word:' + identifierName(t).toUpperCase();
+      else if (t.type === 'str') key += 'str:' + stringLiteralName(t.value).toUpperCase();
+      else key += t.type + ':' + (t.type === 'word' ? t.value.toUpperCase() : t.value);
+    }
+    tokenKeyCache.set(tokens, key);
+    return key;
   }
 
   function needsSpace(prev, cur, compact = false) {
@@ -171,7 +257,7 @@
     if (cur.type === 'comma' || cur.type === 'semi' || (cur.type === 'paren' && cur.value === ')')) return false;
     if (prev.type === 'paren' && prev.value === '(') return false;
     if (cur.value === '.' || prev.value === '.') return false;
-    if (cur.type === 'paren' && cur.value === '(' && (prev.type === 'word' || prev.type === 'qid') && !/^(IN|EXISTS|WHERE|NOT|AND|OR|ON|FROM|SELECT|VALUES|AS|CASE)$/i.test(prev.value)) return false;
+    if (cur.type === 'paren' && cur.value === '(' && (prev.type === 'word' || prev.type === 'qid') && !SPACE_BEFORE_PAREN.has(prev.value.toUpperCase())) return false;
     if (prev.type === 'comma') return !compact;
     if (prev.type === 'comment' || cur.type === 'comment') return true;
     if (compact && (prev.type === 'op' || cur.type === 'op')) return false;
@@ -273,9 +359,13 @@
 
     peek() { return this.tokens[this.index] || null; }
 
+    /* Every keyword this parser looks for is ASCII, and no character
+       uppercases into one, so a length mismatch is already a mismatch. The
+       guard matters because the alternative is a fresh uppercase string for
+       every word token, three times over, on the way through the statement. */
     matchWord(word) {
       const token = this.peek();
-      if (token && token.type === 'word' && token.value.toUpperCase() === word) {
+      if (token && token.type === 'word' && token.value.length === word.length && token.value.toUpperCase() === word) {
         this.index++;
         return true;
       }
@@ -340,7 +430,7 @@
           this.index++;
           continue;
         }
-        if (token.type === 'word') {
+        if (token.type === 'word' && ATOM_KEYWORD_LENGTHS.has(token.value.length)) {
           const word = token.value.toUpperCase();
           if (depth === 0 && caseDepth === 0 && (word === 'AND' || word === 'OR')) {
             if (word === 'AND' && betweenNeedsAnd) {
@@ -366,11 +456,15 @@
 
   function nodeSignature(node) {
     if (!node) return '';
-    if (node.kind === 'atom') return `a:${tokenKey(node.tokens)}`;
     if (node.kind === 'const') return node.value ? 'true' : 'false';
-    if (node.kind === 'not') return `not(${nodeSignature(node.child)})`;
-    const parts = node.children.map(nodeSignature).sort();
-    return `${node.kind}(${parts.join(',')})`;
+    const cached = signatureCache.get(node);
+    if (cached !== undefined) return cached;
+    let signature;
+    if (node.kind === 'atom') signature = `a:${tokenKey(node.tokens)}`;
+    else if (node.kind === 'not') signature = `not(${nodeSignature(node.child)})`;
+    else signature = `${node.kind}(${node.children.map(nodeSignature).sort().join(',')})`;
+    signatureCache.set(node, signature);
+    return signature;
   }
 
   function precedence(node) {
@@ -443,7 +537,7 @@
     if (token.type === 'op' && (token.value === '-' || token.value === '+') && tokens[index + 1] && tokens[index + 1].type === 'num') {
       return { tokens: [token, tokens[index + 1]], next: index + 2 };
     }
-    if (token.type === 'word' && /^(TRUE|FALSE|NULL)$/i.test(token.value)) return { tokens: [token], next: index + 1 };
+    if (token.type === 'word' && LITERAL_WORDS.has(token.value.toUpperCase())) return { tokens: [token], next: index + 1 };
     return null;
   }
 
@@ -466,6 +560,14 @@
 
   function parseConstraint(node) {
     if (!node || node.kind !== 'atom') return null;
+    const cached = constraintCache.get(node);
+    if (cached !== undefined) return cached;
+    const constraint = readConstraint(node);
+    constraintCache.set(node, constraint);
+    return constraint;
+  }
+
+  function readConstraint(node) {
     const tokens = significant(node.tokens);
     const field = fieldAt(tokens);
     if (!field) return null;
@@ -554,7 +656,19 @@
     return null; /* ponytail: BETWEEN stays as-is, NOT BETWEEN is no shorter. */
   }
 
+  /* Memoised on the literal record itself. Every literal in the predicate is
+     read millions of times by the implication scans, and a field on the object
+     is the cheapest lookup available; the records are ours, are built once per
+     atom and are never rewritten. */
   function valueComparable(value) {
+    const cached = value.comparable;
+    if (cached !== undefined) return cached;
+    const computed = readComparable(value);
+    value.comparable = computed;
+    return computed;
+  }
+
+  function readComparable(value) {
     const text = renderTokens(value.tokens).trim();
     if (/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(text)) {
       const number = Number(text);
@@ -626,7 +740,10 @@
         }
         return false;
       };
-      if (strong.kind === 'notSet') return weak.values.every(w => strong.values.some(s => equalityValue(s, w)));
+      if (strong.kind === 'notSet') {
+        const excluded = valueBucketSet(strong.values);
+        return weak.values.every(w => excluded.has(valueBucket(w)));
+      }
       return weak.values.every(excludes);
     }
     if (strong.kind === 'notSet') return false;
@@ -639,13 +756,16 @@
     }
     if (strong.kind === 'eq') {
       if (weak.kind === 'eq') return equalityValue(strong.value, weak.value);
-      if (weak.kind === 'set') return weak.values.some(v => equalityValue(strong.value, v));
+      if (weak.kind === 'set') return valueBucketSet(weak.values).has(valueBucket(strong.value));
       if (weak.kind === 'lower' || weak.kind === 'upper') return satisfies(strong.value, weak.op, weak.value) === true;
       if (weak.kind === 'range') return satisfies(strong.value, weak.lower.op, weak.lower.value) === true && satisfies(strong.value, weak.upper.op, weak.upper.value) === true;
       return false;
     }
     if (strong.kind === 'set') {
-      if (weak.kind === 'set') return strong.values.every(s => weak.values.some(w => equalityValue(s, w)));
+      if (weak.kind === 'set') {
+        const allowed = valueBucketSet(weak.values);
+        return strong.values.every(s => allowed.has(valueBucket(s)));
+      }
       if (weak.kind === 'lower' || weak.kind === 'upper') return strong.values.every(v => satisfies(v, weak.op, weak.value) === true);
       if (weak.kind === 'range') return strong.values.every(v => satisfies(v, weak.lower.op, weak.lower.value) === true && satisfies(v, weak.upper.op, weak.upper.value) === true);
       return false;
@@ -661,20 +781,55 @@
     return null;
   }
 
-  function nodeImplies(stronger, weaker) {
-    if (nodeSignature(stronger) === nodeSignature(weaker)) return true;
-    const strongTerms = nodeTerms(stronger);
-    const weakTerms = nodeTerms(weaker);
-    if (!strongTerms || !weakTerms) return false;
-
-    const strongConstraints = strongTerms.map(term => parseConstraint(term)).filter(Boolean);
-    for (const weakTerm of weakTerms) {
-      const weakConstraint = parseConstraint(weakTerm);
-      if (weakConstraint) {
-        if (!strongConstraints.some(strong => constraintImplies(strong, weakConstraint))) return false;
-      } else if (!strongTerms.some(term => nodeSignature(term) === nodeSignature(weakTerm))) {
-        return false;
+  /* Everything the implication test needs about one node: its signature, its
+     AND terms, and those terms' constraints indexed by column.
+     constraintImplies is false whenever the columns differ, so consulting one
+     column's bucket asks exactly the same question as scanning every term.
+     The scans that remove covered branches compare every pair of branches, so
+     the whole record is derived once per node and then only read. */
+  function implicationFacts(node) {
+    const cached = factsCache.get(node);
+    if (cached !== undefined) return cached;
+    const terms = nodeTerms(node);
+    const entries = [];
+    const byField = new Map();
+    const signatures = new Set();
+    if (terms) {
+      for (const term of terms) {
+        const constraint = parseConstraint(term);
+        if (constraint) {
+          const bucket = byField.get(constraint.field);
+          if (bucket) bucket.push(constraint);
+          else byField.set(constraint.field, [constraint]);
+        }
+        const signature = nodeSignature(term);
+        signatures.add(signature);
+        entries.push({ constraint, signature });
       }
+    }
+    const facts = { signature: nodeSignature(node), conjunctive: terms !== null, entries, byField, signatures };
+    factsCache.set(node, facts);
+    return facts;
+  }
+
+  function impliesFacts(strong, weak) {
+    if (strong.signature === weak.signature) return true;
+    if (!strong.conjunctive || !weak.conjunctive) return false;
+
+    const entries = weak.entries;
+    for (let i = 0; i < entries.length; i++) {
+      const entry = entries[i];
+      if (!entry.constraint) {
+        if (!strong.signatures.has(entry.signature)) return false;
+        continue;
+      }
+      const candidates = strong.byField.get(entry.constraint.field);
+      if (!candidates) return false;
+      let implied = false;
+      for (let k = 0; k < candidates.length; k++) {
+        if (constraintImplies(candidates[k], entry.constraint)) { implied = true; break; }
+      }
+      if (!implied) return false;
     }
     return true;
   }
@@ -717,12 +872,39 @@
     return values.every(value => valueComparable(value) !== null);
   }
 
+  /* equalityValue is an equivalence relation - two literals match when their
+     canonical text is the same, or when both are comparable and compare equal
+     - so it can be written as a single bucket string. The list operations
+     below were all O(n^2) scans of equalityValue; with buckets they are hash
+     lookups, which is what a few hundred grouped product IDs need. */
+  function valueBucket(value) {
+    const cached = value.bucket;
+    if (cached !== undefined) return cached;
+    const comparable = valueComparable(value);
+    const bucket = !comparable ? `k:${value.key}`
+      : comparable.type === 'number' ? `n:${comparable.value}` : `s:${comparable.value}`;
+    value.bucket = bucket;
+    return bucket;
+  }
+
+  function valueBucketSet(values) {
+    const cached = bucketSetCache.get(values);
+    if (cached !== undefined) return cached;
+    const set = new Set();
+    for (const value of values) set.add(valueBucket(value));
+    bucketSetCache.set(values, set);
+    return set;
+  }
+
   function valueListDifference(values, removed) {
-    return values.filter(value => !removed.some(other => equalityValue(value, other)));
+    if (!removed.length) return values.slice();
+    const excluded = valueBucketSet(removed);
+    return values.filter(value => !excluded.has(valueBucket(value)));
   }
 
   function valueListIntersection(left, right) {
-    return left.filter(value => right.some(other => equalityValue(value, other)));
+    const kept = valueBucketSet(right);
+    return left.filter(value => kept.has(valueBucket(value)));
   }
 
   /* NOT IN / <> literals only merge when every one of them can be compared;
@@ -741,7 +923,9 @@
   }
 
   function sameValueSet(left, right) {
-    return left.length === right.length && left.every(value => right.some(other => equalityValue(value, other)));
+    if (left.length !== right.length) return false;
+    const kept = valueBucketSet(right);
+    return left.every(value => kept.has(valueBucket(value)));
   }
 
   function exclusionNodes(fieldTokens, values, state) {
@@ -808,10 +992,14 @@
   }
 
   function valueListUnique(values) {
+    const seen = new Set();
     const out = [];
-    values.forEach(value => {
-      if (!out.some(existing => equalityValue(existing, value))) out.push(value);
-    });
+    for (const value of values) {
+      const bucket = valueBucket(value);
+      if (seen.has(bucket)) continue;
+      seen.add(bucket);
+      out.push(value);
+    }
     return out;
   }
 
@@ -960,7 +1148,7 @@
         }
         eq = eq || c;
       } else if (c.kind === 'set') {
-        allowed = allowed ? allowed.filter(old => c.values.some(next => equalityValue(old, next))) : c.values.slice();
+        allowed = allowed ? valueListIntersection(allowed, c.values) : c.values.slice();
         if (!allowed.length) {
           addRule(ctx, 'impossible');
           return { impossible: true };
@@ -1004,11 +1192,11 @@
     const excluded = exclusions.values;
 
     if (eq) {
-      if (excluded && valueComparable(eq.value) !== null && excluded.some(value => equalityValue(eq.value, value))) {
+      if (excluded && valueComparable(eq.value) !== null && valueBucketSet(excluded).has(valueBucket(eq.value))) {
         addRule(ctx, 'impossible');
         return { impossible: true };
       }
-      if (allowed && !allowed.some(value => equalityValue(eq.value, value))) {
+      if (allowed && !valueBucketSet(allowed).has(valueBucket(eq.value))) {
         addRule(ctx, 'impossible');
         return { impossible: true };
       }
@@ -1123,8 +1311,11 @@
       /* Atoms see only the outer environment: sibling atoms are merged by
          simplifyConstraintGroup, which produces tidier SQL than TRUE/FALSE. */
       const local = env ? raw.map(parseConstraint).filter(Boolean) : [];
+      /* One extended environment for the whole level; it used to be rebuilt
+         for every non-atom child, which is quadratic on a wide AND. */
+      const inner = env ? env.concat(local) : env;
       const children = raw.map(child =>
-        simplify(child, ctx, !env || child.kind === 'atom' ? env : env.concat(local)));
+        simplify(child, ctx, !env || child.kind === 'atom' ? env : inner));
       return simplifyAnd(children, ctx, env);
     }
     /* OR branches may not assume each other, only the surrounding AND. */
@@ -1147,12 +1338,17 @@
      renderLines would add. Factoring only wins when this goes down. */
   function nodeCost(node) {
     if (node.kind === 'const') return 1;
-    if (node.kind === 'atom') return significant(node.tokens).length;
-    if (node.kind === 'not') return 1 + nodeCost(node.child) + (node.child.kind === 'and' || node.child.kind === 'or' ? 2 : 0);
-    return node.children.reduce(
-      (total, child) => total + nodeCost(child) + (node.kind === 'and' && child.kind === 'or' ? 2 : 0),
-      node.children.length - 1,
-    );
+    const cached = costCache.get(node);
+    if (cached !== undefined) return cached;
+    let cost;
+    if (node.kind === 'atom') cost = significant(node.tokens).length;
+    else if (node.kind === 'not') cost = 1 + nodeCost(node.child) + (node.child.kind === 'and' || node.child.kind === 'or' ? 2 : 0);
+    else {
+      cost = node.children.length - 1;
+      for (const child of node.children) cost += nodeCost(child) + (node.kind === 'and' && child.kind === 'or' ? 2 : 0);
+    }
+    costCache.set(node, cost);
+    return cost;
   }
 
   /* (A AND B) OR (A AND C) -> A AND (B OR C). Distribution holds in SQL's
@@ -1194,9 +1390,15 @@
     /* A AND (A OR B) is A. Constraint implication extends the same rule to
        cases such as quantity >= 20 AND (quantity >= 10 OR customer_type=...). */
     const covered = new Set();
-    for (let i = 0; i < children.length; i++) {
-      if (children[i].kind !== 'or') continue;
-      if (children[i].children.some(option => children.some((other, j) => j !== i && nodeImplies(other, option)))) covered.add(i);
+    if (children.some(child => child.kind === 'or')) {
+      const facts = children.map(implicationFacts);
+      for (let i = 0; i < children.length; i++) {
+        if (children[i].kind !== 'or') continue;
+        if (children[i].children.some(option => {
+          const optionFacts = implicationFacts(option);
+          return children.some((other, j) => j !== i && impliesFacts(facts[j], optionFacts));
+        })) covered.add(i);
+      }
     }
     if (covered.size) { addRule(ctx, 'covered'); children = children.filter((_, i) => !covered.has(i)); }
 
@@ -1245,6 +1447,7 @@
   function mergeOrGroup(entries, safe) {
     const fieldTokens = entries[0].constraint.fieldTokens;
     const positives = [];
+    const seenPositives = new Set();
     const negativeLists = [];
 
     for (const entry of entries) {
@@ -1252,7 +1455,10 @@
       if (constraint.kind === 'notSet') { negativeLists.push(constraint.values); continue; }
       const values = constraint.kind === 'eq' ? [constraint.value] : constraint.values;
       values.forEach(value => {
-        if (!positives.some(existing => equalityValue(existing, value))) positives.push(value);
+        const bucket = valueBucket(value);
+        if (seenPositives.has(bucket)) return;
+        seenPositives.add(bucket);
+        positives.push(value);
       });
     }
 
@@ -1274,17 +1480,22 @@
     if (!children.length) return constant(false);
     children = uniqueNodes(children, ctx);
 
-    const remove = new Set();
+    /* A branch only has to be covered once, so the scan moves on to the
+       next one as soon as it finds the branch that covers it. */
+    let removedAny = false;
+    const remove = new Uint8Array(children.length);
+    const facts = children.map(implicationFacts);
     for (let i = 0; i < children.length; i++) {
-      if (remove.has(i)) continue;
+      if (remove[i]) continue;
       for (let j = 0; j < children.length; j++) {
-        if (i === j || remove.has(i) || remove.has(j)) continue;
-        if (nodeImplies(children[i], children[j])) {
-          remove.add(i); addRule(ctx, 'covered');
+        if (i === j || remove[j]) continue;
+        if (impliesFacts(facts[i], facts[j])) {
+          remove[i] = 1; removedAny = true; addRule(ctx, 'covered');
+          break;
         }
       }
     }
-    if (remove.size) children = children.filter((_, index) => !remove.has(index));
+    if (removedAny) children = children.filter((_, index) => !remove[index]);
 
     /* Group equality / IN / NOT IN alternatives into one set per column. */
     const groups = new Map();
@@ -1315,14 +1526,19 @@
     }
 
     /* Merging can make a branch cover another one, so make one final pass. */
-    const finalRemove = new Set();
+    let finalRemovedAny = false;
+    const finalRemove = new Uint8Array(children.length);
+    const finalFacts = children.map(implicationFacts);
     for (let i = 0; i < children.length; i++) {
       for (let j = 0; j < children.length; j++) {
-        if (i === j || finalRemove.has(i)) continue;
-        if (nodeImplies(children[i], children[j])) { finalRemove.add(i); addRule(ctx, 'covered'); }
+        if (i === j) continue;
+        if (impliesFacts(finalFacts[i], finalFacts[j])) {
+          finalRemove[i] = 1; finalRemovedAny = true; addRule(ctx, 'covered');
+          break;
+        }
       }
     }
-    if (finalRemove.size) children = children.filter((_, index) => !finalRemove.has(index));
+    if (finalRemovedAny) children = children.filter((_, index) => !finalRemove[index]);
     return factorOr(children, ctx) || makeLogic('or', children);
   }
 

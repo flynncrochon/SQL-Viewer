@@ -292,17 +292,20 @@ body{
 .hovline{background:var(--row-hover)}
 .curline{background:var(--row-caret)}   /* declared later, so it wins on the same row */
 .diagline{
-  display:none;left:0;right:0;height:calc(var(--fs) * var(--lh));
+  position:absolute;display:none;left:0;right:0;height:calc(var(--fs) * var(--lh));
   background:#f14c4c0d;
   z-index:1;pointer-events:none;
 }
+/* Inline annotation on the error row itself, Error-Lens style: just quiet
+   italic text at the right edge, no box. The background repeats the diagline
+   tint over the editor surface so code running underneath is knocked out
+   without the label reading as a floating panel. */
 .diag-label{
-  display:none;position:absolute;right:22px;padding:3px 7px;
-  border:1px solid #913b3b;border-radius:4px;background:#3b1f20;
-  color:#ffb4b4;font:11px/1.2 var(--mono);white-space:nowrap;
-  z-index:4;pointer-events:none;box-shadow:0 2px 8px #0008;
+  display:none;position:absolute;right:22px;padding:0 1ch;
+  background:linear-gradient(#f14c4c0d 0 0) var(--bg);
+  color:#f48771;font:italic var(--fs)/calc(var(--fs) * var(--lh)) var(--mono);
+  white-space:nowrap;z-index:4;pointer-events:none;
 }
-.lrow.diag-row{background-color:#f14c4c0b}
 .lrow.diag-related-row{background-color:#ffd70008}
 
 /* ---- line numbers ---- */
