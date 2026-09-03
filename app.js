@@ -1163,16 +1163,17 @@ function setStatus(state, text) {
   updateOptimiserButton(state);
 }
 
-/* The optimiser rewrites SQL it has parsed, so it stays greyed out until the
-   syntax check passes. A check that could not run at all - no Worker, parser
-   missing - is not evidence of broken SQL, so the button stays available. */
+/* The optimiser rewrites SQL it has parsed, so a check that came back broken
+   still greys it out - there is nothing it could do with SQL that does not
+   parse. Waiting for the check is a different thing: a check in flight, or one
+   that could not run at all - no Worker, parser missing - is not evidence of
+   anything, so the button stays live and the overlay opens on the click. */
 function updateOptimiserButton(state) {
   const empty = !src.value.trim();
-  const enabled = state === 'ok' || (state === '' && !empty);
+  const enabled = !empty && state !== 'bad';
   optimiserButton.disabled = !enabled;
   optimiserButton.title = enabled ? 'Open SQL Optimiser'
     : empty ? 'Paste some SQL to use the optimiser'
-    : state === 'checking' ? 'Checking syntax...'
     : 'Fix the SQL syntax errors to use the optimiser';
 }
 

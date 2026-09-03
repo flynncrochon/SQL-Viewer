@@ -456,7 +456,32 @@ body{
 .optimizer-added{color:#8ed69e}.optimizer-removed{color:#f18484}
 .optimizer-close{position:absolute;right:0;top:0;width:36px;text-align:center;color:var(--fg-faint);font:inherit;font-size:18px;line-height:34px;cursor:pointer}
 .optimizer-close:hover,.optimizer-close:focus{color:#fff;background:var(--hover);outline:none}
-.optimizer-diff-pane{display:grid;grid-template-columns:1fr;min-height:0;flex:1}
+.optimizer-diff-pane{position:relative;display:grid;grid-template-columns:1fr;min-height:0;flex:1}
+/* ---- the wait ----
+   The overlay opens on the click, before the parse, rewrite and diff behind it
+   have run, so something has to stand where the result will be. Idle SQL is
+   the honest placeholder: the source loops past, dimmed and unhighlighted, so
+   it never reads as a finished answer. It covers the pane rather than sitting
+   under it, which also hides the previous diff while a toggle recomputes. */
+.optimizer-loading{
+  position:absolute;inset:0;overflow:hidden;pointer-events:none;
+  background:var(--bg);color:var(--fg-faint);
+  font-family:var(--mono);font-size:var(--fs);line-height:var(--lh);white-space:pre;
+  -webkit-mask-image:linear-gradient(#0000,#000 14%,#000 86%,#0000);
+  mask-image:linear-gradient(#0000,#000 14%,#000 86%,#0000);
+}
+.optimizer-loading[hidden]{display:none}
+/* The dimming sits on the text, not on the layer: a translucent layer would
+   let the diff underneath show through the wait. */
+.optimizer-loading-track{padding-left:calc(14px + 4.5ch);opacity:.5;animation:optimizer-scan 18s linear infinite}
+/* The two copies hold the same lines, so at -50% the loop lands exactly where
+   it started and the scroll has no seam to see. */
+@keyframes optimizer-scan{from{transform:translateY(0)}to{transform:translateY(-50%)}}
+.optimizer-modal.is-optimising .optimizer-change-count{opacity:.35}
+.optimizer-copy[disabled],.optimizer-toggle[disabled]{opacity:.45;cursor:default}
+.optimizer-copy[disabled]:hover{background:var(--btn)}
+.optimizer-toggle[disabled]:hover .switch-track{background:#5a5a5a}
+.optimizer-toggle[disabled]:hover[aria-pressed="true"] .switch-track{background:var(--btn)}
 .optimizer-code{min-width:0;min-height:0;margin:0;padding:12px 14px;font-family:var(--mono);font-size:var(--fs);line-height:var(--lh);font-weight:400;white-space:pre-wrap;overflow:auto;overflow-wrap:normal;word-break:normal;user-select:text;outline:none;tab-size:2}
 .optimizer-code:focus-visible{box-shadow:inset 0 0 0 1px #707070}
 /* one row per line, numbered in a gutter the copy buttons never see */
@@ -480,6 +505,12 @@ body{
    otherwise make the exact removed and added text harder to scan. */
 .optimizer-code .diff-removed > span,.optimizer-code .diff-added > span{color:inherit}
 body.optimizer-is-open{overflow:hidden}
+/* A frozen placeholder reads as a hung window, and the loop is the only sign
+   the transform is still running, so reduced motion slows it rather than
+   stopping it - the same trade the status spinner makes. */
+@media (prefers-reduced-motion:reduce){
+  .optimizer-loading-track{animation-duration:54s}
+}
 
 @media (max-width:700px){
   .optimizer-dialog{width:calc(100vw - 20px);height:calc(100vh - 28px)}

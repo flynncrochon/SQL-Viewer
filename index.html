@@ -107,7 +107,7 @@
             <span class="copy-labels" aria-hidden="true"><span data-state="idle">copy</span><span data-state="copied">copied</span><span data-state="error">failed</span></span>
             <span class="copy-live" role="status" aria-live="polite"></span>
           </button>
-          <button class="optimizer-toggle" id="optimizerGroupColumn" type="button" title="Group prodid conditions" aria-label="Group prodid conditions" aria-pressed="false"><span class="switch-track" aria-hidden="true"></span><span class="optimizer-toggle-long">group prodid</span><span class="optimizer-toggle-short" aria-hidden="true">prodid</span></button>
+          <button class="optimizer-toggle" id="optimizerGroupColumn" type="button" title="Group by prodid conditions" aria-label="Group by prodid conditions" aria-pressed="false"><span class="switch-track" aria-hidden="true"></span><span class="optimizer-toggle-long">Group by prodid</span><span class="optimizer-toggle-short" aria-hidden="true">prodid</span></button>
           <span class="optimizer-change-count" id="optimizerChangeCount" aria-label="Character changes">
             <span class="optimizer-added" id="optimizerAdded">+0</span><span class="optimizer-count-separator">, </span><span class="optimizer-removed" id="optimizerRemoved">-0</span>
           </span>
@@ -116,11 +116,16 @@
       </div>
       <div class="optimizer-diff-pane">
         <pre class="optimizer-code" id="optimizerCode" tabindex="0" aria-label="Optimised SQL, with the removed text struck through"></pre>
+        <div class="optimizer-loading" id="optimizerLoading" hidden aria-hidden="true">
+          <div class="optimizer-loading-track">
+            <div class="optimizer-loading-copy"></div><div class="optimizer-loading-copy"></div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 
-<script src="app.js?v=unified-diff-1" defer></script>
-<script src="optimizer.js?v=copy-icon-1" defer></script>
+<script src="app.js?v=instant-optimiser-1" defer></script>
+<script src="optimizer.js?v=instant-optimiser-1" defer></script>
 </body>
 </html>

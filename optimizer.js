@@ -1431,6 +1431,8 @@
   const groupColumnShort = groupColumnButton.querySelector('.optimizer-toggle-short');
   const addedCount = document.getElementById('optimizerAdded');
   const removedCount = document.getElementById('optimizerRemoved');
+  const loading = document.getElementById('optimizerLoading');
+  const loadingCopies = [...loading.querySelectorAll('.optimizer-loading-copy')];
   let lastFocus = null;
   let currentOldText = '';
   let currentNewText = '';
@@ -1881,9 +1883,9 @@
 
   function updateGroupColumnButton() {
     groupColumnButton.setAttribute('aria-pressed', String(groupColumnEnabled));
-    groupColumnLong.textContent = `group ${groupColumn}`;
+    groupColumnLong.textContent = `Group by ${groupColumn}`;
     groupColumnShort.textContent = groupColumn;
-    const label = `Group ${groupColumn} conditions`;
+    const label = `Group by ${groupColumn} conditions`;
     groupColumnButton.title = label;
     groupColumnButton.setAttribute('aria-label', label);
   }
@@ -1893,7 +1895,7 @@
     unified: { text, removedStarts: new Set(), addedStarts: new Set() },
   });
 
-  function renderOptimizedSql() {
+  function paintOptimizedSql() {
     const result = optimiseSql(currentOldText, { groupColumn: groupColumnEnabled ? groupColumn : '' });
     const laid = result.error
       ? noChange(currentOldText)
@@ -1908,19 +1910,76 @@
     removedCount.textContent = `-${laid.removedCount}`;
   }
 
+  /* The pane cannot be empty while the transform runs, and the only text that
+     exists at that point is the SQL that was handed over. Enough lines to
+     overfill the pane, held twice, so the scroll can loop without a seam. */
+  const LOADING_LINES = 64;
+
+  function startLoading() {
+    const lines = currentOldText ? currentOldText.split('\n') : [''];
+    const sample = [];
+    while (sample.length < LOADING_LINES) sample.push(...lines);
+    const text = sample.slice(0, LOADING_LINES).join('\n');
+    loadingCopies.forEach(copy => { copy.textContent = text; });
+    loading.hidden = false;
+    modal.classList.add('is-optimising');
+    code.setAttribute('aria-busy', 'true');
+    /* Nothing to copy yet, and a second transform cannot be queued on top. */
+    copyNew.disabled = true;
+    groupColumnButton.disabled = true;
+  }
+
+  function stopLoading() {
+    loading.hidden = true;
+    loadingCopies.forEach(copy => { copy.textContent = ''; });
+    modal.classList.remove('is-optimising');
+    code.removeAttribute('aria-busy');
+    copyNew.disabled = false;
+    groupColumnButton.disabled = false;
+  }
+
+  /* Opening waits for nothing: the overlay is on screen in the frame the click
+     lands in, and the parse, rewrite and diff behind it - which grow with the
+     SQL, and on a long query are felt - start only once it has been painted. */
+  let renderRun = 0;
+
+  function renderOptimizedSql() {
+    const run = ++renderRun;
+    startLoading();
+    /* Two frames: the first paints the overlay and the loop, the second is
+       free to block for however long the transform takes. */
+    requestAnimationFrame(() => requestAnimationFrame(() => {
+      if (run !== renderRun) return;
+      /* The overlay now opens on SQL the checker has not passed, so the
+         transform can meet anything. Whatever it makes of it, the loop stops:
+         a stuck placeholder would be the one failure with no way out. */
+      try { paintOptimizedSql(); } finally { stopLoading(); }
+    }));
+  }
+
   function show(sql) {
     currentOldText = String(sql || '').trim();
+    currentNewText = '';
     groupColumnEnabled = false;
     updateGroupColumnButton();
-    renderOptimizedSql();
+    /* Whatever was optimised last must not sit behind the loop as if it were
+       this query's answer. */
+    code.innerHTML = '';
+    addedCount.textContent = '+0';
+    removedCount.textContent = '-0';
     modal.hidden = false;
     modal.setAttribute('aria-hidden', 'false');
     document.body.classList.add('optimizer-is-open');
     lastFocus = document.activeElement;
     code.focus();
+    renderOptimizedSql();
   }
 
   function hide() {
+    /* A run still waiting on its frames would otherwise paint into a closed
+       overlay, or land on whatever is opened next. */
+    renderRun++;
+    stopLoading();
     modal.hidden = true;
     modal.setAttribute('aria-hidden', 'true');
     document.body.classList.remove('optimizer-is-open');
