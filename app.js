@@ -2165,7 +2165,7 @@ function markBrackets() {
 
 /* ---- words ---- */
 
-/* VS Code's default word separators. Chrome's own breaker reads
+/* The editor's word separators. Chrome's own breaker reads
    "119410,119422" as a single number - comma and all, the way it would read
    "1,234" - which is both the wrong thing to double-click and the wrong thing
    to highlight, so word boundaries are decided here instead. */
@@ -2187,7 +2187,7 @@ function wordRangeAt(text, at) {
 
 /* ---- other runs of the selected text ---- */
 
-/* Two VS Code behaviours over one mechanism.
+/* Two editor behaviours over one mechanism.
 
    "Selection highlight": select something and every other copy of it picks up
    a faint box. "Occurrence highlight": with nothing selected, the word the
@@ -2227,7 +2227,7 @@ function selectionNeedle() {
   if (to - from > MATCH_MAX_LEN) return null;
 
   const text = value.slice(from, to);
-  // a multi-line drag is a range rather than a word; VS Code skips those too
+  // a multi-line drag is a range rather than a word, so it is skipped too
   if (!text.trim() || text.includes('\n')) return null;
 
   const upto = value.slice(0, from);
@@ -3906,7 +3906,7 @@ function lineEndOf(text, at) {
 }
 
 /* Home alternates between the first real character and column zero, the way
-   both Visual Studio and VS Code do it. */
+   desktop editors do it. */
 function homeOf(text, at) {
   const start = lineStartOf(text, at);
   const end = lineEndOf(text, at);

@@ -1,6 +1,6 @@
 <p align="center">
   <a href="https://flynncrochon.github.io/SQL-Viewer/">
-    <img src="icons/sql-viewer-brackets-vscode-balanced.svg" alt="SQL Viewer bracket icon" width="96">
+    <img src="icons/sql-viewer-brackets.svg" alt="SQL Viewer bracket icon" width="96">
   </a>
 </p>
 
@@ -32,7 +32,7 @@
 ## Features
 
 - SQL syntax highlighting and bracket folding.
-- Column (box) selection and multiple carets, as in Visual Studio.
+- Column (box) selection and multiple carets.
   `Alt`+drag draws a box, `Ctrl`+`Alt`+drag or click adds another caret or
   selection, and `Ctrl`+`Alt`+`Up`/`Down` stacks carets in a column. The box
   keeps its rectangle over short and empty lines and the carets stay in one

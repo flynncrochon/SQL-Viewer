@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>SQL Viewer</title>
-<link rel="icon" type="image/svg+xml" href="icons/sql-viewer-brackets-vscode-balanced.svg">
+<link rel="icon" type="image/svg+xml" href="icons/sql-viewer-brackets.svg">
 <meta name="description" content="Paste SQL, see it broken down by bracket depth, and review safe logical optimisations.">
-<link rel="stylesheet" href="styles.css?v=unified-diff-2">
+<link rel="stylesheet" href="styles.css?v=same-size-1">
 </head>
 <body>
   <header class="bar">
@@ -91,8 +91,23 @@
       <div class="optimizer-titlebar">
         <div class="optimizer-header-side">
           <span class="optimizer-title">Optimised</span>
-          <button class="optimizer-copy" id="optimizerCopyNew" type="button" title="Copy optimised SQL">copy</button>
-          <button class="optimizer-toggle" id="optimizerGroupColumn" type="button" title="Group prodid conditions" aria-label="Group prodid conditions" aria-pressed="false"><span class="optimizer-toggle-long">group prodid</span><span class="optimizer-toggle-short" aria-hidden="true">prodid</span></button>
+          <button class="optimizer-copy" id="optimizerCopyNew" type="button" data-state="idle" title="Copy optimised SQL" aria-label="Copy optimised SQL">
+            <span class="copy-icons" aria-hidden="true">
+              <svg class="copy-icon-idle" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M9.6 5.1V3.7A1.7 1.7 0 0 0 7.9 2H3.7A1.7 1.7 0 0 0 2 3.7v4.2a1.7 1.7 0 0 0 1.7 1.7h1.4"/>
+                <rect x="5.1" y="5.1" width="6.9" height="6.9" rx="1.7"/>
+              </svg>
+              <svg class="copy-icon-copied" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path class="copy-tick" pathLength="1" d="M2.9 7.4 5.6 10.1 11.1 4"/>
+              </svg>
+              <svg class="copy-icon-error" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M3.6 3.6 10.4 10.4"/><path d="M10.4 3.6 3.6 10.4"/>
+              </svg>
+            </span>
+            <span class="copy-labels" aria-hidden="true"><span data-state="idle">copy</span><span data-state="copied">copied</span><span data-state="error">failed</span></span>
+            <span class="copy-live" role="status" aria-live="polite"></span>
+          </button>
+          <button class="optimizer-toggle" id="optimizerGroupColumn" type="button" title="Group prodid conditions" aria-label="Group prodid conditions" aria-pressed="false"><span class="switch-track" aria-hidden="true"></span><span class="optimizer-toggle-long">group prodid</span><span class="optimizer-toggle-short" aria-hidden="true">prodid</span></button>
           <span class="optimizer-change-count" id="optimizerChangeCount" aria-label="Character changes">
             <span class="optimizer-added" id="optimizerAdded">+0</span><span class="optimizer-count-separator">, </span><span class="optimizer-removed" id="optimizerRemoved">-0</span>
           </span>
@@ -106,6 +121,6 @@
   </div>
 
 <script src="app.js?v=unified-diff-1" defer></script>
-<script src="optimizer.js?v=word-select-1" defer></script>
+<script src="optimizer.js?v=copy-icon-1" defer></script>
 </body>
 </html>

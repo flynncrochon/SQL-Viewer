@@ -1,39 +1,46 @@
-/* Palette lifted from VS Code's "Dark+" / Dark (Visual Studio) theme. */
+/* Dark editor palette: a low-contrast grey chrome under saturated syntax. */
 :root{
-  --bg:#1e1e1e;            /* editor.background */
-  --chrome:#252526;        /* sideBar.background - the header bar */
-  --line:#2b2b2b;          /* panel.border */
-  --fg:#d4d4d4;            /* editor.foreground */
-  --fg-faint:#858585;      /* editorLineNumber.foreground */
-  --guide:#404040;         /* editorIndentGuide.background */
-  --sel:#264f78;           /* editor.selectionBackground */
-  --sel-match:#add6ff26;   /* editor.selectionHighlightBackground */
+  --bg:#1e1e1e;            /* the editor surface */
+  --chrome:#252526;        /* the header bar and other chrome */
+  --line:#2b2b2b;          /* panel borders */
+  --fg:#d4d4d4;            /* body text */
+  --fg-faint:#858585;      /* line numbers and other quiet text */
+  --guide:#404040;         /* indent guides */
+  --sel:#264f78;           /* the selection rectangle */
+  --sel-match:#add6ff26;   /* other runs of the selected text */
   --sel-match-line:#add6ff40;
-  --word-hl:#ffffff12;     /* editor.wordHighlightBackground, toned down */
+  --word-hl:#ffffff12;     /* the word under the caret */
   --word-hl-line:#ffffff24;
-  --caret:#aeafad;         /* editorCursor.foreground */
-  --hover:#2a2d2e;         /* list.hoverBackground */
+  --caret:#aeafad;         /* the caret */
+  --hover:#2a2d2e;         /* the row under the pointer in a list */
   --row-hover:#242424;     /* the row under the pointer */
   --row-caret:#2d2d2e;     /* the row the caret sits on */
 
-  /* dark_plus token colours */
-  --kw:#d16969;            /* SELECT / WHERE / AND / OR - VS Code's red */
-  --fn:#dcdcaa;            /* entity.name.function */
-  --str:#ce9178;           /* string.quoted */
-  --num:#b5cea8;           /* constant.numeric */
-  --lit:#569cd6;           /* constant.language - NULL / TRUE / FALSE */
+  /* syntax token colours */
+  --kw:#d16969;            /* SELECT / WHERE / AND / OR */
+  --fn:#dcdcaa;            /* function names */
+  --str:#ce9178;           /* quoted strings */
+  --num:#b5cea8;           /* numbers */
+  --lit:#569cd6;           /* NULL / TRUE / FALSE */
   --op:#a9b7c6;
   --id:#9cdcfe;            /* columns */
   --qid:#c586c0;           /* `quoted` / [quoted] identifiers */
-  --com:#6a9955;           /* comment */
+  --com:#6a9955;           /* comments */
 
-  /* editorBracketHighlight.foreground1..3 - VS Code cycles through three */
+  /* bracket depth cycles through three colours */
   --b0:#ffd700;
   --b1:#da70d6;
   --b2:#179fff;
 
-  --ok:#73c991;            /* testing.iconPassed */
-  --bad:#f14c4c;           /* editorError.foreground */
+  /* Filled action button: a solid blue plate, brighter on hover, white label. */
+  --btn:#0e639c;
+  --btn-hover:#1177bb;
+  --btn-fg:#ffffff;
+  --btn-radius:4px;
+  --focus:#007fd4;
+
+  --ok:#73c991;            /* a passing check */
+  --bad:#f14c4c;           /* an error */
   --wait:#858585;
 
   --mono:ui-monospace,"SF Mono","Cascadia Mono","Cascadia Code",Consolas,"Courier New",monospace;
@@ -72,15 +79,16 @@ body{
   display:block;user-select:none;
 }
 .optimiser-button{
-  appearance:none;display:inline-flex;align-items:center;height:22px;padding:0 8px;
-  border:1px solid var(--guide);border-radius:3px;
-  background:transparent;color:var(--fg-faint);
-  font:inherit;font-size:12px;cursor:pointer;
-  transition:color .15s ease,border-color .15s ease;
+  appearance:none;display:inline-flex;align-items:center;justify-content:center;
+  height:22px;padding:0 12px;
+  border:1px solid transparent;border-radius:var(--btn-radius);
+  background:var(--btn);color:var(--btn-fg);
+  font:inherit;font-size:12px;line-height:1;cursor:pointer;
+  transition:background .15s ease;
 }
-.optimiser-button:hover:not(:disabled){border-color:var(--fg-faint);color:var(--fg)}
-.optimiser-button:disabled{opacity:.5;cursor:default}
-.optimiser-button:focus-visible{outline:1px solid #8c8c8c;outline-offset:2px}
+.optimiser-button:hover:not(:disabled){background:var(--btn-hover)}
+.optimiser-button:disabled{opacity:.4;cursor:default}
+.optimiser-button:focus-visible{outline:1px solid var(--focus);outline-offset:2px}
 .spacer{flex:1}
 .status{
   appearance:none;display:inline-flex;align-items:center;gap:6px;
@@ -103,8 +111,11 @@ body{
 }
 .status > span{min-width:0;overflow:hidden;text-overflow:ellipsis}
 @keyframes status-spin{to{transform:rotate(360deg)}}
+/* A stopped spinner reads as a frozen app, and this one is small and turns in
+   place, so reduced motion slows it rather than killing it - it is the only
+   sign the check is still running. */
 @media (prefers-reduced-motion:reduce){
-  .status[data-s="checking"]::before{animation:none}
+  .status[data-s="checking"]::before{animation-duration:1.4s}
 }
 .settings-button{
   appearance:none;display:inline-flex;align-items:center;justify-content:center;
@@ -143,27 +154,37 @@ body{
 .settings-remove:hover{color:var(--bad);background:var(--hover)}
 .settings-add{display:flex;gap:6px;margin:0}
 .settings-add input{
-  flex:1;min-width:0;height:22px;padding:0 8px;border:1px solid var(--guide);border-radius:3px;
+  flex:1;min-width:0;height:22px;padding:0 8px;border:1px solid var(--guide);border-radius:var(--btn-radius);
   background:var(--bg);color:var(--fg);font:inherit;
 }
 .settings-add input:focus{outline:none;border-color:#8c8c8c}
 .settings-subhead{margin-top:12px}
 
-/* an on/off switch sitting on the right of its own heading */
-.settings-switch{
-  appearance:none;flex:0 0 auto;width:26px;height:14px;padding:0;
-  border:1px solid var(--guide);border-radius:7px;background:var(--bg);
-  cursor:pointer;transition:background .15s ease,border-color .15s ease;
+/* ---- pill switch ---------------------------------------------------------
+   One track for every on/off control. Borderless: the track is a solid plate
+   whose colour carries the state - grey for off, the button blue for on - and
+   the knob stays white so it reads against both. A rim around something this
+   small only adds noise. */
+.settings-switch,.switch-track{
+  appearance:none;display:block;flex:0 0 auto;width:26px;height:15px;padding:0;
+  border:0;border-radius:999px;background:#5a5a5a;
+  cursor:pointer;transition:background .15s ease;
 }
-.settings-switch::before{
-  content:"";display:block;width:8px;height:8px;margin:2px;border-radius:50%;
-  background:var(--fg-faint);transition:transform .15s ease,background .15s ease;
+.settings-switch::before,.switch-track::before{
+  content:"";display:block;width:8px;height:8px;margin:3.5px;border-radius:50%;
+  background:#fff;transition:transform .15s ease;
 }
-.settings-switch[aria-checked="true"]{border-color:#4f7fa8;background:#264f78}
-.settings-switch[aria-checked="true"]::before{transform:translateX(12px);background:var(--fg)}
-.settings-switch:focus-visible{outline:1px solid #8c8c8c;outline-offset:2px}
+.settings-switch[aria-checked="true"],
+.optimizer-toggle[aria-pressed="true"] .switch-track{background:var(--btn)}
+.settings-switch[aria-checked="true"]::before,
+.optimizer-toggle[aria-pressed="true"] .switch-track::before{transform:translateX(11px)}
+.settings-switch:hover,.optimizer-toggle:hover .switch-track{background:#6a6a6a}
+.settings-switch:hover[aria-checked="true"],
+.optimizer-toggle:hover[aria-pressed="true"] .switch-track{background:var(--btn-hover)}
+.settings-switch:focus-visible{outline:1px solid var(--focus);outline-offset:2px}
 @media (prefers-reduced-motion:reduce){
-  .settings-switch,.settings-switch::before{transition:none}
+  .settings-switch,.switch-track,
+  .settings-switch::before,.switch-track::before{transition:none}
 }
 
 /* ---- panes ---- */
@@ -205,7 +226,7 @@ body{
 .editor textarea::selection{background:var(--sel)}
 .mirror::-webkit-scrollbar{display:none}
 
-/* Every other run of the selected text, VS Code's "selection highlight". The
+/* Every other run of the selected text - the "selection highlight". The
    boxes live under the textarea, so the real selection - painted by the
    textarea itself - still wins wherever the two overlap. */
 .matchlayer{
@@ -383,16 +404,56 @@ body{
 .optimizer-modal{position:fixed;inset:0;z-index:20;display:flex;align-items:center;justify-content:center;background:#0009}
 .optimizer-modal[hidden]{display:none}
 .optimizer-dialog{width:min(1440px,calc(100vw - 40px));height:min(860px,calc(100vh - 56px));display:flex;flex-direction:column;background:var(--bg);border:1px solid #3f3f46;box-shadow:0 18px 48px #000b}
-.optimizer-titlebar{position:relative;display:flex;flex:0 0 32px;border-bottom:1px solid var(--line);background:var(--chrome);font:inherit;font-size:11px;line-height:32px;font-weight:400}
-.optimizer-header-side{display:flex;align-items:center;gap:8px;min-width:0;padding:0 12px;padding-right:36px}.optimizer-title{color:var(--fg)}
-.optimizer-copy,.optimizer-toggle{height:20px;padding:0 6px;border:1px solid #45484d;border-radius:2px;background:transparent;color:var(--fg-faint);font:inherit;font-size:10px;line-height:18px;cursor:pointer}
-.optimizer-copy:hover,.optimizer-toggle:hover{border-color:#73777d;background:#303236;color:var(--fg)}
-.optimizer-toggle[aria-pressed="true"]{border-color:#64866d;background:#26372b;color:#b7dfbe}
+/* The optimiser is a full window, not a subordinate strip, so its chrome runs
+   at the same 12px and 22px as the top bar rather than a size down. */
+.optimizer-titlebar{position:relative;display:flex;flex:0 0 36px;border-bottom:1px solid var(--line);background:var(--chrome);font:inherit;font-size:12px;line-height:36px;font-weight:400}
+.optimizer-header-side{display:flex;align-items:center;gap:8px;min-width:0;padding:0 12px;padding-right:40px}.optimizer-title{color:var(--fg)}
+.optimizer-copy{
+  display:inline-flex;align-items:center;gap:6px;height:22px;padding:0 12px;
+  border:1px solid transparent;border-radius:var(--btn-radius);
+  background:var(--btn);color:var(--btn-fg);
+  font:inherit;font-size:12px;line-height:1;cursor:pointer;
+  transition:background .15s ease;
+}
+.optimizer-copy:hover{background:var(--btn-hover)}
+.optimizer-copy:focus-visible{outline:1px solid var(--focus);outline-offset:2px}
+/* The group toggle reads as a switch, not a button, so it drops the box and
+   wears the pill instead. */
+.optimizer-toggle{
+  display:inline-flex;align-items:center;gap:6px;height:22px;padding:0;
+  border:0;background:transparent;color:var(--fg);
+  font:inherit;font-size:12px;line-height:1;cursor:pointer;
+}
+.optimizer-toggle:focus-visible{outline:1px solid #8c8c8c;outline-offset:2px}
 .optimizer-toggle-short{display:none}
-.optimizer-copy.copied{border-color:#64866d;color:#a9d7b3}
-.optimizer-change-count{display:inline-flex;align-items:center;white-space:nowrap;color:var(--fg-faint);font:inherit;font-size:12px;line-height:20px}
+/* The copy button carries three faces - copy, tick, cross - stacked in one
+   cell and crossfaded off data-state, so the plate never resizes mid-swap and
+   the icon alone reports what happened. */
+.copy-icons{display:grid;width:12px;height:12px;flex:0 0 auto}
+.copy-icons > svg{
+  grid-area:1/1;width:12px;height:12px;
+  opacity:0;transform:scale(.92);
+  transition:opacity .22s cubic-bezier(.23,1,.32,1),transform .22s cubic-bezier(.23,1,.32,1);
+}
+.copy-labels{display:grid;align-items:center}
+.copy-labels > span{
+  grid-area:1/1;white-space:nowrap;
+  opacity:0;transform:translateY(3px);filter:blur(3px);
+  transition:opacity .22s cubic-bezier(.23,1,.32,1),transform .22s cubic-bezier(.23,1,.32,1),filter .22s cubic-bezier(.23,1,.32,1);
+}
+.optimizer-copy[data-state="idle"]   .copy-icon-idle,
+.optimizer-copy[data-state="copied"] .copy-icon-copied,
+.optimizer-copy[data-state="error"]  .copy-icon-error{opacity:1;transform:scale(1)}
+.optimizer-copy[data-state="idle"]   .copy-labels > [data-state="idle"],
+.optimizer-copy[data-state="copied"] .copy-labels > [data-state="copied"],
+.optimizer-copy[data-state="error"]  .copy-labels > [data-state="error"]{opacity:1;transform:translateY(0);filter:blur(0)}
+/* The tick draws itself. pathLength=1 makes the dash maths exact. */
+.copy-tick{stroke-dasharray:1;stroke-dashoffset:1;transition:stroke-dashoffset .26s cubic-bezier(.23,1,.32,1)}
+.optimizer-copy[data-state="copied"] .copy-tick{stroke-dashoffset:0}
+.copy-live{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.optimizer-change-count{display:inline-flex;align-items:center;white-space:nowrap;color:var(--fg-faint);font:inherit;font-size:12px;line-height:22px}
 .optimizer-added{color:#8ed69e}.optimizer-removed{color:#f18484}
-.optimizer-close{position:absolute;right:0;top:0;width:32px;text-align:center;color:var(--fg-faint);font:inherit;font-size:18px;line-height:30px;cursor:pointer}
+.optimizer-close{position:absolute;right:0;top:0;width:36px;text-align:center;color:var(--fg-faint);font:inherit;font-size:18px;line-height:34px;cursor:pointer}
 .optimizer-close:hover,.optimizer-close:focus{color:#fff;background:var(--hover);outline:none}
 .optimizer-diff-pane{display:grid;grid-template-columns:1fr;min-height:0;flex:1}
 .optimizer-code{min-width:0;min-height:0;margin:0;padding:12px 14px;font-family:var(--mono);font-size:var(--fs);line-height:var(--lh);font-weight:400;white-space:pre-wrap;overflow:auto;overflow-wrap:normal;word-break:normal;user-select:text;outline:none;tab-size:2}

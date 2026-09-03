@@ -1953,25 +1953,41 @@
       && range.compareBoundaryPoints(Range.END_TO_END, all) >= 0;
   }
 
+  /* The button carries three faces - copy, tick, cross - and CSS crossfades
+     between them off data-state. Only the state and the screen-reader line
+     change here; nothing rewrites the label text. */
+  const COPY_RESET_MS = 2000;
+  let copyResetTimer = null;
+
+  function setCopyState(button, state) {
+    button.dataset.state = state;
+    const live = button.querySelector('[role="status"]');
+    if (live) live.textContent = state === 'copied' ? 'Copied' : state === 'error' ? 'Copy failed' : '';
+    clearTimeout(copyResetTimer);
+    if (state !== 'idle') copyResetTimer = setTimeout(() => setCopyState(button, 'idle'), COPY_RESET_MS);
+  }
+
   async function copySql(text, button) {
+    let ok = true;
     try {
       await navigator.clipboard.writeText(text);
     } catch (_) {
       /* No clipboard permission: select the pane and let the copy handler
          below substitute the optimised SQL for what is on screen. */
-      selectAll();
-      document.execCommand('copy');
-      window.getSelection().removeAllRanges();
+      try {
+        selectAll();
+        ok = document.execCommand('copy');
+        window.getSelection().removeAllRanges();
+      } catch (__) {
+        ok = false;
+      }
     }
-    const label = button.textContent;
-    button.textContent = 'copied';
-    button.classList.add('copied');
-    setTimeout(() => { button.textContent = label; button.classList.remove('copied'); }, 1000);
+    setCopyState(button, ok ? 'copied' : 'error');
   }
 
   /* ---- double click selects one word, exactly as the panes behind do ---- */
 
-  /* VS Code's word separators, the same list the editor uses. Chrome's own
+  /* The same word separators the editor panes use. Chrome's own
      breaker reads "119410,119422" as one number - comma and all - and reaches
      past a closing bracket for the line break behind it, so a double click in
      here would take something a double click in the source pane never would. */
