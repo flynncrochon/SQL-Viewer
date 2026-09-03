@@ -89,6 +89,26 @@ body{
 .optimiser-button:hover:not(:disabled){background:var(--btn-hover)}
 .optimiser-button:disabled{opacity:.4;cursor:default}
 .optimiser-button:focus-visible{outline:1px solid var(--focus);outline-offset:2px}
+/* The fold button carries both faces - a right chevron for collapse, a down
+   chevron for expand - stacked in one cell, so the plate is sized by the wider
+   label once and never resizes as the state flips under the pointer. */
+.fold-all-button{gap:6px}
+.fold-icons{display:grid;width:12px;height:12px;flex:0 0 auto}
+.fold-icons > svg{
+  grid-area:1/1;width:12px;height:12px;
+  opacity:0;transform:scale(.92);
+  transition:opacity .22s cubic-bezier(.23,1,.32,1),transform .22s cubic-bezier(.23,1,.32,1);
+}
+.fold-labels{display:grid;align-items:center;justify-items:center}
+.fold-labels > span{
+  grid-area:1/1;white-space:nowrap;
+  opacity:0;transform:translateY(3px);filter:blur(3px);
+  transition:opacity .22s cubic-bezier(.23,1,.32,1),transform .22s cubic-bezier(.23,1,.32,1),filter .22s cubic-bezier(.23,1,.32,1);
+}
+.fold-all-button[data-state="collapse"] .fold-icon-collapse,
+.fold-all-button[data-state="expand"]   .fold-icon-expand{opacity:1;transform:scale(1)}
+.fold-all-button[data-state="collapse"] .fold-labels > [data-state="collapse"],
+.fold-all-button[data-state="expand"]   .fold-labels > [data-state="expand"]{opacity:1;transform:translateY(0);filter:blur(0)}
 .spacer{flex:1}
 .status{
   appearance:none;display:inline-flex;align-items:center;gap:6px;

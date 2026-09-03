@@ -786,7 +786,12 @@ function paintGutter(mirrorEl, gutInEl, editorEl, marks, wide) {
     const h = (i + 1 < rows.length ? tops[i + 1] : lastBottom) - tops[i];
     html += `<i style="height:${h}px">${marks[i] || ''}</i>`;
   }
-  const digits = Math.max(2, String(marks.length).length);
+  /* Sized off the highest number actually shown, not the row count: with folds
+     collapsed a handful of rows can still be numbered into the thousands, and
+     a gutter too narrow for them lets each number overflow its own box, so the
+     right edge lands further right the more digits it has. */
+  const last = /<b>(\d+)<\/b>/.exec(marks[marks.length - 1] || '');
+  const digits = Math.max(2, (last ? last[1] : String(marks.length)).length);
   editorEl.style.setProperty('--gut', `calc(${digits}ch + ${wide ? 34 : 24}px)`);
   gutInEl.innerHTML = html;
 }
@@ -1086,7 +1091,6 @@ const fmtDiagLabel = document.getElementById('fmtDiagLabel');
 const statusEl = document.getElementById('status');
 const statusText = document.getElementById('statusText');
 const foldAllButton = document.getElementById('foldAll');
-const foldAllText = document.getElementById('foldAllText');
 const optimiserButton = document.getElementById('optimiser');
 
 const KEY = 'sqlviewer.input';
@@ -1196,7 +1200,7 @@ function updateFoldAllButton() {
   const action = allCollapsed ? 'Expand all' : 'Collapse all';
 
   foldAllButton.disabled = lines.length === 0;
-  foldAllText.textContent = action;
+  foldAllButton.dataset.state = allCollapsed ? 'expand' : 'collapse';
   foldAllButton.title = `${action} brackets`;
   foldAllButton.setAttribute('aria-label', `${action} brackets`);
 }

@@ -6,7 +6,7 @@
 <title>SQL Viewer</title>
 <link rel="icon" type="image/svg+xml" href="icons/sql-viewer-brackets.svg">
 <meta name="description" content="Paste SQL, see it broken down by bracket depth, and review safe logical optimisations.">
-<link rel="stylesheet" href="styles.css?v=same-size-1">
+<link rel="stylesheet" href="styles.css?v=fold-icon-1">
 </head>
 <body>
   <header class="bar">
@@ -17,8 +17,16 @@
     <button class="optimiser-button" id="optimiser" type="button" title="Open SQL Optimiser">
       <span>Optimiser</span>
     </button>
-    <button class="optimiser-button fold-all-button" id="foldAll" type="button" title="Collapse all brackets" aria-label="Collapse all brackets">
-      <span id="foldAllText">Collapse all</span>
+    <button class="optimiser-button fold-all-button" id="foldAll" type="button" data-state="collapse" title="Collapse all brackets" aria-label="Collapse all brackets">
+      <span class="fold-icons" aria-hidden="true">
+        <svg class="fold-icon-collapse" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M5.4 3.2 9.2 7 5.4 10.8"/>
+        </svg>
+        <svg class="fold-icon-expand" viewBox="0 0 14 14" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3.2 5.4 7 9.2 10.8 5.4"/>
+        </svg>
+      </span>
+      <span class="fold-labels" aria-hidden="true"><span data-state="collapse">Collapse all</span><span data-state="expand">Expand all</span></span>
     </button>
     <span class="spacer"></span>
     <button class="status" id="status" type="button" title="Validity check" aria-live="polite" aria-atomic="true">
@@ -125,7 +133,7 @@
     </div>
   </div>
 
-<script src="app.js?v=instant-optimiser-1" defer></script>
+<script src="app.js?v=fold-icon-1" defer></script>
 <script src="optimizer.js?v=instant-optimiser-1" defer></script>
 </body>
 </html>
